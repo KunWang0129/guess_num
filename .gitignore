@@ -223,3 +223,6 @@ multirun/
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# Remote Commands
+/remote
