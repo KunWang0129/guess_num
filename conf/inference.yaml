@@ -1,0 +1,83 @@
+# Inference configuration for Sequence Guessing RL Agent
+# Mirrors training defaults for agent, environment, and data loading
+
+defaults:
+  - agent: dqn
+  - env: sequence_guesser
+  - _self_
+
+project:
+  name: "sequence_guessing_rl"
+  version: "1.0.0"
+  description: "RL Agent with Options Framework for Sequence Guessing Game"
+
+seed: 42
+
+device: auto  # auto, cpu, cuda, or specific device like "cuda:0"
+
+checkpoint:
+  path: "./logs/checkpoints/final_model.ckpt"
+
+# Dataset-backed sequence provider shared with training config structure
+data_loader:
+  enabled: true
+  path: "./data/sequence_bank/sequence_bank_complement_pairs_test.jsonl"
+  families: []
+  limit: null
+  shuffle: false
+  cycle: false
+  strict: true
+  seed: ${seed}
+
+evaluation:
+  num_episodes: null  # Defaults to dataset size when null
+  seed: ${seed}
+  deterministic: true
+
+env_overrides:
+  enabled: false
+  verbose: null
+  max_episode_steps: null
+  provide_feedback: null
+
+output:
+  dir: "./inference_results"
+  save_detailed_logs: true
+  save_summary: true
+  save_csv: true
+  save_plots: false
+
+metrics:
+  success_rate: true
+  mean_reward: true
+  reward_distribution: true
+  episode_length_stats: true
+  option_usage_stats: true
+  step_by_step_analysis: false
+  convergence_analysis: false
+  percentiles: [10, 25, 50, 75, 90, 95, 99]
+
+logging:
+  level: "INFO"
+  log_file: null
+  console_output: true
+  progress_bar: true
+
+analysis:
+  baseline_comparison: false
+  baseline_random_episodes: 1000
+  statistical_tests: false
+  confidence_level: 0.95
+  sequence_analysis: false
+
+experimental:
+  attention_analysis: false
+  adversarial_sequences: false
+  checkpoint_comparison: false
+  comparison_checkpoints: []
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}/inference
+  job:
+    name: inference_${project.name}

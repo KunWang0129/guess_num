@@ -1,0 +1,25 @@
+# Test configuration for sequence bank generation
+
+defaults:
+  - _self_
+
+seed: 456
+digit_min: 0
+digit_max: 9
+target_sum: 9
+test: true
+
+sequence_length: 10
+count: 300
+
+family:
+  name: complement_pairs
+  params: {}
+
+output:
+  dir: ./data/sequence_bank
+  prefix: sequence_bank
+  format: jsonl
+  include_timestamp: false
+
+manifest: true

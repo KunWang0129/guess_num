@@ -1,0 +1,27 @@
+# Environment configuration for Sequence Guessing Game
+# Parameters for the sequence guessing environment
+
+# Game parameters
+sequence_length: 10  # Length of the hidden sequence to guess
+max_episode_steps: 100  # Maximum steps before episode termination
+num_values: 4  # Possible values at each position (0-3)
+
+# Reward structure
+reward_correct_guess: 100.0  # Reward for correctly guessing the entire sequence
+reward_wrong_guess: -1.0     # Penalty for incorrect guess
+reward_step: -0.1            # Small penalty for each step to encourage efficiency
+reward_partial_correct: 10.0  # Reward for getting part of the sequence correct
+
+# Environment behavior settings
+provide_feedback: true  # Whether to provide feedback on partial correctness
+allow_repeated_guesses: true  # Whether the same guess can be made multiple times
+
+# State space configuration
+# State includes: current_guess + feedback + metadata
+# Total state size = sequence_length * 2 + 3
+
+# Action space configuration
+# Action space size = sequence_length * num_values (position * value combinations)
+
+# Debugging and monitoring
+verbose: false  # Enable verbose logging for debugging

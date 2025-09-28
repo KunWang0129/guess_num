@@ -1,0 +1,70 @@
+# PyTorch Lightning Trainer configuration
+
+# Hardware settings
+accelerator: "auto"  # Automatically detect available hardware (CPU/GPU/MPS)
+devices: "auto"      # Use all available devices
+precision: "32-true" # Use 32-bit precision
+
+# Training duration
+max_epochs: 1000
+max_steps: -1        # Unlimited steps (-1 means no limit)
+min_epochs: 1
+max_time: null       # Maximum training time (e.g., "00:12:00:00" for 12 hours)
+
+# Training behavior
+fast_dev_run: false  # Run only one batch for quick debugging
+limit_train_batches: null  # Limit training batches (null = use all)
+limit_val_batches: null    # Limit validation batches (null = use all)
+
+# Validation settings
+check_val_every_n_epoch: 10  # Run validation every N epochs
+val_check_interval: null     # Check validation every N training batches
+
+# Logging settings
+log_every_n_steps: 50     # Log metrics every N steps
+enable_progress_bar: true  # Show progress bar
+enable_model_summary: true # Print model summary
+
+# Callbacks and checkpointing
+enable_checkpointing: true
+default_root_dir: "./outputs"  # Directory for logs and checkpoints
+
+# Performance optimizations
+gradient_clip_val: null        # Gradient clipping (null = no clipping)
+gradient_clip_algorithm: "norm" # Gradient clipping algorithm
+accumulate_grad_batches: 1     # Accumulate gradients over N batches
+
+# Debugging and profiling
+detect_anomaly: false   # Enable anomaly detection for debugging
+profiler: null          # Enable profiler (e.g., "simple", "advanced")
+num_sanity_val_steps: 2 # Number of validation steps to run before training
+
+# Logging backends
+logger:
+  - class_path: pytorch_lightning.loggers.TensorBoardLogger
+    init_args:
+      save_dir: "./outputs/tensorboard"
+      name: "dqn_sequence_guesser"
+      version: null
+      log_graph: false
+      default_hp_metric: true
+
+# Callbacks
+callbacks:
+  - class_path: pytorch_lightning.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: "./outputs/checkpoints"
+      filename: "dqn-{epoch:02d}-{train_loss:.2f}"
+      monitor: "train_loss"
+      mode: "min"
+      save_top_k: 3
+      save_last: true
+      every_n_epochs: 50
+
+  - class_path: pytorch_lightning.callbacks.EarlyStopping
+    init_args:
+      monitor: "train_loss"
+      mode: "min"
+      patience: 100
+      min_delta: 0.001
+      check_finite: true

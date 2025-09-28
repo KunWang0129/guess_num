@@ -1,0 +1,32 @@
+# Default configuration for sequence bank generation
+
+defaults:
+  - _self_
+
+seed: 123
+digit_min: 0
+digit_max: 9
+target_sum: 9
+test: false
+
+sequence_length: 10
+count: 500
+
+# Available sequence families:
+# - uniform: Random sequences with digits uniformly distributed within range
+# - complement_pairs: Sequences where pairs of positions sum to target_sum
+# - parity_lock: All digits have same parity (odd or even), specify params: {parity: "odd"/"even"}
+# - gaussian_centered: Digits follow Gaussian distribution, params: {mean: 5.0, std: 1.5}
+# - progression: Arithmetic progressions with optional noise, params: {start_range: [min, max], step_options: [-2, -1, 1, 2], noise_prob: 0.0, noise_magnitude: 1}
+
+family:
+  name: uniform
+  params: {}
+
+output:
+  dir: ./data/sequence_bank
+  prefix: sequence_bank
+  format: jsonl
+  include_timestamp: false
+
+manifest: true
