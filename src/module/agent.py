@@ -12,6 +12,7 @@ from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 import random
 import copy
+from collections import Counter
 
 from .environment import SequenceGuessingEnv
 from .model import create_model, ModelConfig
@@ -40,6 +41,9 @@ class AgentConfig:
     # Training parameters
     max_episodes: int = 1000
     max_steps_per_episode: int = 100
+
+    # Q-value normalization
+    q_value_clip_max: float = 100.0  # Clip Q-values to prevent explosion
 
     # Options-specific parameters
     use_macro_options: bool = True
@@ -93,7 +97,16 @@ class DQNAgent(pl.LightningModule):
 
         # Environment information
         env_info = env.get_info()
-        self.state_size = env_info['state_size']
+        self.sequence_length = env_info['sequence_length']
+        self.num_values = env_info['num_values']
+
+        # State size for raw states (from environment)
+        self.raw_state_size = env_info['state_size']
+
+        # State size for one-hot encoded states (for neural network)
+        # One-hot: sequence_length * num_values + 3 metadata features
+        self.state_size = self.sequence_length * self.num_values + 3
+
         self.num_primitive_actions = env_info['action_space_size']
 
         # Initialize options manager
@@ -117,6 +130,7 @@ class DQNAgent(pl.LightningModule):
         # Model configuration
         model_config = ModelConfig(
             state_size=self.state_size,
+            num_values=self.num_values,
             num_primitive_actions=self.num_primitive_actions,
             num_options=self.num_options,
             hidden_sizes=config.hidden_sizes,
@@ -135,8 +149,7 @@ class DQNAgent(pl.LightningModule):
         buffer_config = ReplayBufferConfig(
             capacity=config.buffer_size,
             batch_size=config.batch_size,
-            min_size=config.min_replay_size,
-            prioritized=config.prioritized_replay
+            min_size=config.min_replay_size
         )
         self.replay_buffer = create_replay_buffer(buffer_config)
 
@@ -158,9 +171,68 @@ class DQNAgent(pl.LightningModule):
         # Initialize optimizer
         self.optimizer = torch.optim.Adam(self.q_network.parameters(), lr=config.learning_rate)
 
+    def _state_to_onehot(self, state: torch.Tensor) -> torch.Tensor:
+        """
+        Convert raw state representation to one-hot encoded state for neural network input.
+
+        Args:
+            state: Raw state tensor (batch_size, raw_state_size) or (raw_state_size,)
+                   Format: [sequence values (sequence_length), metadata (3)]
+
+        Returns:
+            One-hot encoded state tensor
+                   Format: [one-hot encoded sequence (sequence_length * num_values), metadata (3)]
+        """
+        # Handle both single state and batch
+        if state.dim() == 1:
+            state = state.unsqueeze(0)
+            squeeze_output = True
+        else:
+            squeeze_output = False
+
+        batch_size = state.shape[0]
+
+        # Extract sequence and metadata
+        sequence = state[:, :self.sequence_length].long()  # (batch_size, sequence_length)
+        metadata = state[:, self.sequence_length:]  # (batch_size, 3)
+
+        # One-hot encode the sequence
+        # F.one_hot expects LongTensor and returns (batch_size, sequence_length, num_values)
+        sequence_onehot = F.one_hot(sequence, num_classes=self.num_values).float()
+
+        # Flatten the one-hot encoding: (batch_size, sequence_length * num_values)
+        sequence_onehot_flat = sequence_onehot.reshape(batch_size, -1)
+
+        # Concatenate with metadata
+        onehot_state = torch.cat([sequence_onehot_flat, metadata], dim=1)
+
+        if squeeze_output:
+            onehot_state = onehot_state.squeeze(0)
+
+        return onehot_state
+
     def forward(self, state: torch.Tensor) -> torch.Tensor:
-        """Forward pass through Q-network"""
-        return self.q_network(state)
+        """
+        Forward pass through Q-network
+
+        Args:
+            state: Raw state tensor (will be converted to one-hot internally)
+
+        Returns:
+            Q-values for all actions
+        """
+        onehot_state = self._state_to_onehot(state)
+        return self.q_network(onehot_state)
+
+    def _get_primitive_option_name(self, action_index: int) -> Optional[str]:
+        """Get primitive option name from action index"""
+        if self.options_manager is None:
+            return None
+
+        # Primitive options are the first entries in the catalog
+        if 0 <= action_index < len(self.options_manager.primitive_options):
+            return self.options_manager.primitive_options[action_index].name
+        return None
 
     def select_action(self, state: torch.Tensor, epsilon: Optional[float] = None) -> Tuple[int, Dict[str, Any]]:
         """
@@ -210,9 +282,22 @@ class DQNAgent(pl.LightningModule):
                                 "option_metadata": option_result.metadata
                             }
 
-            # Random primitive action
-            action = random.randint(0, self.num_primitive_actions - 1)
-            return action, {"action_type": "primitive", "exploration": True}
+            # Random primitive action - only select from valid actions
+            validity_mask = self.env.get_action_validity_mask()
+            valid_actions = torch.where(validity_mask)[0]
+
+            if len(valid_actions) == 0:
+                # No valid actions available - should not happen in normal gameplay
+                # Fall back to any action (environment will handle this)
+                action = random.randint(0, self.num_primitive_actions - 1)
+            else:
+                action = valid_actions[random.randint(0, len(valid_actions) - 1)].item()
+
+            primitive_option_name = self._get_primitive_option_name(action)
+            metadata = {"action_type": "primitive", "exploration": True}
+            if primitive_option_name:
+                metadata["option_name"] = primitive_option_name
+            return action, metadata
 
         else:
             # Exploitation: use Q-network
@@ -223,12 +308,22 @@ class DQNAgent(pl.LightningModule):
             if state_tensor.dim() == 1:
                 state_tensor = state_tensor.unsqueeze(0)
 
+            # Convert raw state to one-hot for neural network
+            state_onehot = self._state_to_onehot(state_tensor)
+
             with torch.no_grad():
-                q_values = self.q_network(state_tensor)
+                q_values = self.q_network(state_onehot)
+
+            # Get action validity mask and apply to primitive actions
+            validity_mask = self.env.get_action_validity_mask()
+            validity_mask_tensor = validity_mask.to(device=self.device)
 
             # Split Q-values into primitive and option parts
-            primitive_q = q_values[:, :self.num_primitive_actions]
+            primitive_q = q_values[:, :self.num_primitive_actions].clone()
             option_q = q_values[:, self.num_primitive_actions:] if self.num_options > 0 else None
+
+            # Apply validity mask to primitive actions
+            primitive_q[0, ~validity_mask_tensor] = float('-inf')
 
             # Select best action overall or best among available options
             if self.config.use_macro_options and option_q is not None:
@@ -243,7 +338,7 @@ class DQNAgent(pl.LightningModule):
 
                     masked_option_q = option_q + option_mask
 
-                    # Choose between best primitive action and best available option
+                    # Choose between best valid primitive action and best available option
                     best_primitive_q = primitive_q.max()
                     best_option_q = masked_option_q.max()
 
@@ -263,13 +358,55 @@ class DQNAgent(pl.LightningModule):
                                     "option_metadata": option_result.metadata
                                 }
 
-            # Select best primitive action
+            # Select best valid primitive action
             action = primitive_q.argmax().item()
-            return action, {
+            primitive_option_name = self._get_primitive_option_name(action)
+            metadata = {
                 "action_type": "primitive",
                 "exploration": False,
                 "q_value": primitive_q.max().item()
             }
+            if primitive_option_name:
+                metadata["option_name"] = primitive_option_name
+            return action, metadata
+
+    def _compute_validity_mask_from_state_batch(self, states: torch.Tensor) -> torch.Tensor:
+        """
+        Compute action validity masks for a batch of states.
+
+        Note: Only masks "no-op" actions (same digit at same index).
+        Does NOT mask locked correct positions since target is not in state.
+
+        Args:
+            states: Batch of states (batch_size, state_size)
+
+        Returns:
+            Boolean mask (batch_size, num_primitive_actions) where True = valid
+        """
+        batch_size = states.shape[0]
+        sequence_length = self.env.sequence_length
+        num_values = self.env.num_values
+
+        # Extract current_guess from each state (first sequence_length elements)
+        current_guesses = states[:, :sequence_length]  # (batch_size, sequence_length)
+
+        # Initialize all actions as valid
+        validity_masks = torch.ones(
+            batch_size, self.num_primitive_actions,
+            dtype=torch.bool, device=states.device
+        )
+
+        # For each action, check if it's a no-op
+        for action_idx in range(self.num_primitive_actions):
+            position = action_idx // num_values
+            value = action_idx % num_values
+
+            # Check if this action would be a no-op for each state in batch
+            # Invalid if current_guess[position] == value
+            is_no_op = (current_guesses[:, position] == value)
+            validity_masks[:, action_idx] = ~is_no_op
+
+        return validity_masks
 
     def train_step(self) -> Optional[float]:
         """
@@ -290,13 +427,40 @@ class DQNAgent(pl.LightningModule):
         next_states = batch["next_states"]
         dones = batch["dones"]
 
-        # Current Q-values
-        current_q_values = self.q_network(states).gather(1, actions.unsqueeze(1))
+        # Convert raw states to one-hot for neural network input
+        states_onehot = self._state_to_onehot(states)
+        next_states_onehot = self._state_to_onehot(next_states)
 
-        # Next Q-values from target network
+        # Current Q-values
+        current_q_values = self.q_network(states_onehot).gather(1, actions.unsqueeze(1))
+
+        # Next Q-values from target network with validity masking
         with torch.no_grad():
-            next_q_values = self.target_network(next_states).max(1)[0].detach()
+            next_q_all = self.target_network(next_states_onehot)
+
+            # Apply validity mask to exclude no-op actions
+            validity_masks = self._compute_validity_mask_from_state_batch(next_states)
+
+            # Apply mask to primitive actions only
+            next_q_primitives = next_q_all[:, :self.num_primitive_actions].clone()
+            next_q_primitives[~validity_masks] = float('-inf')
+
+            # If we have options, also consider them
+            if self.num_options > 0:
+                next_q_options = next_q_all[:, self.num_primitive_actions:]
+                next_q_masked = torch.cat([next_q_primitives, next_q_options], dim=1)
+            else:
+                next_q_masked = next_q_primitives
+
+            next_q_values = next_q_masked.max(1)[0].detach()
             target_q_values = rewards + (self.config.gamma * next_q_values * (~dones))
+
+            # Clip target Q-values to prevent explosion
+            target_q_values = torch.clamp(
+                target_q_values,
+                -self.config.q_value_clip_max,
+                self.config.q_value_clip_max
+            )
 
         # Compute loss
         loss = F.mse_loss(current_q_values.squeeze(), target_q_values)
@@ -305,7 +469,7 @@ class DQNAgent(pl.LightningModule):
         self.optimizer.zero_grad()
         loss.backward()
 
-        # Gradient clipping
+        # Gradient clipping (clip each gradient value norm)
         torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 1.0)
 
         self.optimizer.step()
@@ -369,6 +533,7 @@ class DQNAgent(pl.LightningModule):
 
         done = False
         step_infos = []
+        option_selection_counts = Counter()
 
         while not done and self.episode_steps < self.config.max_steps_per_episode:
             # Select action
@@ -404,6 +569,11 @@ class DQNAgent(pl.LightningModule):
             self.episode_steps += 1
 
             # Log step information
+            option_name = action_metadata.get("option_name")
+            if option_name:
+                # Count both primitive option selections and macro option initiations
+                option_selection_counts[option_name] += 1
+
             step_infos.append({
                 "step": self.episode_steps,
                 "action": action,
@@ -432,7 +602,8 @@ class DQNAgent(pl.LightningModule):
             "step_infos": step_infos,
             "replay_buffer_size": len(self.replay_buffer) if train else 0,
             "epsilon": self.epsilon,
-            "options_stats": self.options_manager.get_option_stats() if self.options_manager else {}
+            "options_stats": self.options_manager.get_option_stats() if self.options_manager else {},
+            "option_selection_counts": dict(option_selection_counts)
         }
 
         return episode_stats
@@ -455,12 +626,14 @@ class DQNAgent(pl.LightningModule):
         episode_rewards = []
         episode_lengths = []
         success_rate = 0
+        option_counter = Counter()
 
         with torch.no_grad():
             for episode in range(num_episodes):
                 episode_stats = self.run_episode(train=False)
                 episode_rewards.append(episode_stats["episode_reward"])
                 episode_lengths.append(episode_stats["episode_length"])
+                option_counter.update(episode_stats.get("option_selection_counts", {}))
 
                 # Check if episode was successful (sequence guessed correctly)
                 if episode_stats.get("episode_done", False):
@@ -497,7 +670,8 @@ class DQNAgent(pl.LightningModule):
             "std_length": std_length,
             "success_rate": success_rate / num_episodes if num_episodes > 0 else 0.0,
             "best_reward": best_reward,
-            "worst_reward": worst_reward
+            "worst_reward": worst_reward,
+            "option_selection_counts": dict(option_counter)
         }
 
     def get_training_stats(self) -> Dict[str, Any]:

@@ -2,9 +2,9 @@
 
 This document provides a detailed summary of the implementation of the RL-based sequence guessing agent. The project is structured into several modules, each responsible for a specific part of the system.
 
-## 1. Environment (`src/environment.py`)
+## 1. Environment (`src/module/environment.py`)
 
-The `src/environment.py` module contains the `SequenceGuessingEnv` class, which is a custom environment for the sequence guessing game. It provides a Gym-like API for the agent to interact with. The reward system has been refactored to separate completion-based rewards from utility-based rewards.
+The `src/module/environment.py` module contains the `SequenceGuessingEnv` class, which is a custom environment for the sequence guessing game. It provides a Gym-like API for the agent to interact with. The reward system has been refactored to separate completion-based rewards from utility-based rewards.
 
 ### `SequenceGuessingConfig`
 
@@ -12,21 +12,21 @@ A `dataclass` that holds the configuration for the environment.
 
 - **`sequence_length`**: The length of the sequence to be guessed.
 - **`max_episode_steps`**: The maximum number of steps allowed per episode.
-- **`num_values`**: The number of possible values for each position in the sequence (e.g., 1-9).
-- **`reward_correct_guess`**: The reward given for guessing the entire sequence correctly.
+- **`num_values`**: The number of distinct digit values available at each position (e.g., 10 for digits 0-9).
+- **`reward_correct_guess`**: The completion bonus applied when every position is correct.
 - **`reward_wrong_guess`**: The penalty for making a wrong guess when the sequence is complete.
 - **`reward_step`**: The penalty for each step taken.
-- **`reward_partial_correct`**: The reward for each correctly guessed position.
+- **`reward_partial_correct`**: The per-position progress reward applied to each correctly guessed value.
 - **`provide_feedback`**: A boolean to control whether to provide feedback on partially correct guesses.
 - **`allow_repeated_guesses`**: A boolean to control whether the agent is penalized for repeating a guess.
 - **`verbose`**: A boolean to enable or disable verbose logging.
 
 ### `CompletionReward`
 
-Encapsulates the reward function for correctly guessing the sequence.
+Encapsulates the completion-focused reward shaping.
 
-- **`__init__(self, reward_correct_guess: float)`**: Initializes the `CompletionReward` class.
-- **`reward_correct_guess(self, current_guess: torch.Tensor, target_sequence: torch.Tensor) -> float`**: Returns the reward for a correct guess.
+- **`__init__(self, reward_correct_guess: float, reward_partial_correct: float)`**: Initializes the `CompletionReward` class with both the completion bonus and per-position reward magnitudes.
+- **`reward_correct_guess(self, current_guess: torch.Tensor, target_sequence: torch.Tensor) -> float`**: Returns a reward equal to the number of correctly matched positions times `reward_partial_correct`, plus the full `reward_correct_guess` bonus when every position matches.
 
 ### `UtilityReward`
 
@@ -114,7 +114,7 @@ The main class for the sequence guessing environment.
     - `config_dict` (Dict[str, Any]): A dictionary containing the environment's configuration parameters.
 - **Outputs**: `SequenceGuessingEnv`: A new instance of the environment.
 
-## 2. Model (`src/model.py`)
+## 2. Model (`src/module/model.py`)
 
 The `model.py` module defines the neural network architecture for the DQN agent.
 
@@ -190,9 +190,9 @@ The main neural network model, which is a simple Multi-Layer Perceptron (MLP).
     - `num_options` (int): The number of available options.
 - **Outputs**: `int`: The total size of the action space.
 
-## 3. Options Framework (`src/options.py`)
+## 3. Options Framework (`src/module/options.py`)
 
-The Options Framework, implemented in `src/options.py`, provides a mechanism for the agent to learn and execute temporally extended actions, known as 'options'. Instead of selecting a single primitive action (guessing a number at a position) at each step, the agent can choose to initiate an option, which then follows its own internal policy for a series of steps.
+The Options Framework, implemented in `src/module/options.py`, provides a mechanism for the agent to learn and execute temporally extended actions, known as 'options'. Instead of selecting a single primitive action (guessing a number at a position) at each step, the agent can choose to initiate an option, which then follows its own internal policy for a series of steps.
 
 This hierarchical approach allows the agent to operate at a higher level of abstraction. For example, instead of learning a complex sequence of primitive actions to fill the first half of the sequence, it can learn to simply invoke the `GuessFirstHalfOption`.
 
@@ -295,7 +295,7 @@ A central manager for the entire options framework.
 
 - **`create_options_manager(...) -> OptionsManager`**: A factory function to construct and configure an `OptionsManager`, allowing for the inclusion of primitive options and selective enabling of macro options.
 
-## 4. Replay Buffer (`src/replay_buffer.py`)
+## 4. Replay Buffer (`src/module/replay_buffer.py`)
 
 The `replay_buffer.py` module is a critical component for off-policy reinforcement learning algorithms like DQN. Its primary role is to store the agent's experiences—transitions of `(state, action, reward, next_state)`—so the agent can learn from them at a later time. By sampling batches of these experiences randomly, the agent breaks the temporal correlations in the data, leading to more stable and efficient training.
 
@@ -314,15 +314,15 @@ The `replay_buffer.py` module is a critical component for off-policy reinforceme
 
 ### Usage in the Agent Framework
 
-The replay buffer is a core component managed directly by the `DQNAgent` in `src/agent.py`.
+The replay buffer is a core component managed directly by the `DQNAgent` in `src/module/agent.py`.
 
 1.  **Initialization**: In the agent's `__init__` method, a replay buffer is created using the `create_replay_buffer` factory based on the configuration provided in `conf/agent/dqn.yaml` (e.g., `prioritized_replay: true`).
 2.  **Data Collection**: The main training loop is in `src/train.py`. During each episode, the `DQNAgent.run_episode()` method is called. At every step, after the agent interacts with the environment, it stores the resulting experience by calling `self.replay_buffer.add(...)`.
 3.  **Training**: The agent's `train_step()` method is responsible for learning. It first checks if the buffer is ready for sampling (`replay_buffer.can_sample()`). If so, it calls `self.replay_buffer.sample_tensors()` to retrieve a batch of past experiences. These tensors are then used to compute the loss and update the Q-network's weights.
 
-## 5. Agent (`src/agent.py`)
+## 5. Agent (`src/module/agent.py`)
 
-The `src/agent.py` module implements the `DQNAgent`, which is the brain of the reinforcement learning system. It is built on PyTorch Lightning to structure the training process and encapsulates the complete logic for agent-environment interaction, learning, and evaluation.
+The `src/module/agent.py` module implements the `DQNAgent`, which is the brain of the reinforcement learning system. It is built on PyTorch Lightning to structure the training process and encapsulates the complete logic for agent-environment interaction, learning, and evaluation.
 
 ### Core Components:
 
@@ -557,7 +557,7 @@ The `src/train.py` script is the main entry point for configuring and running th
 
 This utility is used to generate datasets of sequences with different properties.
 
-- **Sequence Generators**: It includes several sequence generators, such as `generate_uniform`, `generate_complement_pairs`, `generate_parity_lock`, `generate_gaussian_centered`, and `generate_progression`.
+- **Sequence Generators**: It now ships uniform sampling plus option-aligned generators including palindromes, contiguous block fills, Gaussian draws, monotonic ramps, sum targeters, high/low alternators, repetitive patterns, π digit prefixes, and difference-maintaining streaks.
 - **Output**: The generated sequences are saved in JSONL format, along with a manifest file containing metadata about the dataset.
 
 ### `src/data/loaders.py`

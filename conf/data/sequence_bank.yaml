@@ -6,22 +6,51 @@ defaults:
 seed: 123
 digit_min: 0
 digit_max: 9
-target_sum: 9
 test: false
 
 sequence_length: 10
-count: 500
+count: 1000
 
 # Available sequence families:
-# - uniform: Random sequences with digits uniformly distributed within range
-# - complement_pairs: Sequences where pairs of positions sum to target_sum
-# - parity_lock: All digits have same parity (odd or even), specify params: {parity: "odd"/"even"}
-# - gaussian_centered: Digits follow Gaussian distribution, params: {mean: 5.0, std: 1.5}
-# - progression: Arithmetic progressions with optional noise, params: {start_range: [min, max], step_options: [-2, -1, 1, 2], noise_prob: 0.0, noise_magnitude: 1}
+# - uniform: Random sequences drawn from the configured digit range
+# - palindrome: Symmetric palindromes mirroring digits across the sequence
+# - same_number_block: Contiguous identical digit blocks anchored with leading ones
+# - gaussian_sequence: Gaussian-distributed digits clipped to range with fixed anchors
+# - monotonic_sequence: Non-decreasing sequences from 0 to 9
+# - sum_targeter: Sequences adjusted to hit a global digit sum target
+# - high_low_alternator: Alternating low/high digit assignments with fixed endpoints
+# - repetitive_pattern: Repeating digit motifs such as the 8-4 pattern
+# - digits_of_pi: Prefixes of π's digit expansion
+# - difference_maintaining: Sequences constrained to a narrow value band (width 4)
 
 family:
-  name: uniform
-  params: {}
+  name: mixed
+  families:
+    - name: uniform
+    - name: palindrome
+    - name: same_number_block
+      params:
+        max_block_size: 4
+    - name: gaussian_sequence
+      params:
+        mean: 5.0
+        variance: 2.0
+        anchor_value: 5
+    - name: monotonic_sequence
+      params:
+        start_digit: 0
+        end_digit: 9
+    - name: sum_targeter
+      params:
+        target_sum: 60
+    - name: high_low_alternator
+    - name: repetitive_pattern
+      params:
+        pattern: [8, 4]
+    - name: digits_of_pi
+    - name: difference_maintaining
+      params:
+        range_width: 4
 
 output:
   dir: ./data/sequence_bank

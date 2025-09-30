@@ -18,31 +18,33 @@ class SequenceGuessingConfig:
     """Configuration class for the Sequence Guessing Environment"""
     sequence_length: int = 4
     max_episode_steps: int = 100
-    num_values: int = 9  # Values 1-9
-    reward_correct_guess: float = 100.0
-    reward_wrong_guess: float = -1.0
-    reward_step: float = -0.1
-    reward_partial_correct: float = 10.0
+    num_values: int = 10  # Number of distinct digit values (0-9 by default)
+    reward_step: float = -0.5
+    reward_half_correct: float = 50.0  # Bonus when half the sequence is correct
+    reward_fully_correct: float = 100.0  # Bonus when fully correct
     provide_feedback: bool = True
     allow_repeated_guesses: bool = True
+    lock_correct_positions: bool = False  # Whether to prevent edits to correct positions
     verbose: bool = False
 
 
 class CompletionReward:
     """Encapsulates completion-focused reward functions."""
 
-    def __init__(self, reward_correct_guess: float) -> None:
-        self.reward_correct_guess_value = reward_correct_guess
+    def __init__(self) -> None:
+        pass
 
-    def reward_correct_guess(
+    def compute_delta_matches(
         self,
         current_guess: torch.Tensor,
         target_sequence: torch.Tensor,
+        previous_matches: int,
     ) -> float:
-        """Return the reward for correctly guessing the sequence."""
-        if torch.equal(current_guess, target_sequence):
-            return float(self.reward_correct_guess_value)
-        return 0.0
+        """Return reward based on change in number of matches: Δmatches = matches(t+1) - matches(t)"""
+        correct_positions = current_guess == target_sequence
+        current_matches = int(torch.sum(correct_positions).item())
+        delta = current_matches - previous_matches
+        return float(delta)
 
 
 class UtilityReward:
@@ -68,9 +70,10 @@ class SequenceGuessingEnv:
     Sequence Guessing Environment with Gym-like API
 
     The agent must guess a hidden sequence of numbers. Each action represents
-    placing a specific value (1-9) at a specific position (0 to sequence_length-1).
+    placing a specific value (0 to num_values-1) at a specific position (0 to
+    sequence_length-1).
 
-    Action Space: position * num_values + (value - 1)
+    Action Space: position * num_values + value
     State Space: Current guess attempts, feedback history, step count
     """
 
@@ -93,7 +96,7 @@ class SequenceGuessingEnv:
         """Initialize the Sequence Guessing Environment"""
         self.config = config or SequenceGuessingConfig()
         self.sequence_provider = sequence_provider
-        self.completion_reward = CompletionReward(self.config.reward_correct_guess)
+        self.completion_reward = CompletionReward()
 
         if use_utility_reward:
             selected_utility = utility_reward_name or "reward_step"
@@ -111,15 +114,14 @@ class SequenceGuessingEnv:
         self.num_values = self.config.num_values
         self.max_episode_steps = self.config.max_episode_steps
 
-        # Action space: position * num_values + (value - 1)
-        # Example: position=0, value=5 -> action = 0*9 + (5-1) = 4
+        # Action space: position * num_values + value
+        # Example: position=0, value=5 -> action = 0 * 10 + 5 = 5
         self.action_space_size = self.sequence_length * self.num_values
 
         # State space dimensions
-        # State includes: current_guess + feedback_history + metadata
+        # State includes: current_guess + metadata
         self.state_size = (
             self.sequence_length +  # current guess
-            self.sequence_length +  # last feedback (correct positions)
             3  # step_count, episode_done, last_reward
         )
 
@@ -129,13 +131,23 @@ class SequenceGuessingEnv:
     def _reset_state(self) -> None:
         """Reset internal state variables"""
         self.target_sequence: Optional[torch.Tensor] = None
-        self.current_guess = torch.zeros(self.sequence_length, dtype=torch.int64)
+        # Start each episode with a random guess to encourage diverse initial states.
+        self.current_guess = torch.randint(
+            low=0,
+            high=self.num_values,
+            size=(self.sequence_length,),
+            dtype=torch.int64,
+        )
         self.step_count = 0
         self.episode_done = False
         self.last_feedback = torch.zeros(self.sequence_length, dtype=torch.int64)
         self.last_reward = 0.0
+        self.previous_matches = 0
         self.guess_history: List[torch.Tensor] = []
         self.current_sequence_metadata: Dict[str, Any] = {}
+        # Track milestone achievements
+        self.half_correct_achieved = False
+        self.fully_correct_achieved = False
 
     def reset(self) -> torch.Tensor:
         """
@@ -160,10 +172,10 @@ class SequenceGuessingEnv:
             provider_metadata.setdefault("source", "dataset")
             self.current_sequence_metadata = provider_metadata
         else:
-            # Generate new random target sequence (values 1 to num_values)
+            # Generate new random target sequence (values 0 to num_values-1)
             self.target_sequence = torch.randint(
-                low=1,
-                high=self.num_values + 1,
+                low=0,
+                high=self.num_values,
                 size=(self.sequence_length,),
                 dtype=torch.int64
             )
@@ -180,7 +192,7 @@ class SequenceGuessingEnv:
 
         Args:
             action: Integer representing position and value to place
-                   Formula: position * num_values + (value - 1)
+                   Formula: position * num_values + value
 
         Returns:
             Tuple of (next_state, reward, done, info)
@@ -193,7 +205,7 @@ class SequenceGuessingEnv:
 
         # Decode action into position and value
         position = action // self.num_values
-        value = (action % self.num_values) + 1  # Values are 1-indexed
+        value = action % self.num_values
 
         # Update current guess at the specified position
         self.current_guess[position] = int(value)
@@ -203,9 +215,18 @@ class SequenceGuessingEnv:
         reward = self._calculate_reward()
         self.last_reward = reward
 
+        # Determine whether this guess repeats a previous one when repeats are disallowed
+        is_repeat_guess = (
+            not self.config.allow_repeated_guesses and
+            any(torch.equal(self.current_guess, prev_guess) for prev_guess in self.guess_history)
+        )
+
         # Check if episode is done
-        done = self._is_episode_done()
+        done = self._is_episode_done(is_repeat_guess=is_repeat_guess)
         self.episode_done = done
+
+        if not self.config.allow_repeated_guesses and not is_repeat_guess:
+            self.guess_history.append(self.current_guess.clone())
 
         # Create info dictionary
         info = {
@@ -233,28 +254,43 @@ class SequenceGuessingEnv:
         if self.utility_reward is not None:
             reward += self.utility_reward.compute()
 
-        is_correct = torch.equal(self.current_guess, self.target_sequence)
-        reward += self.completion_reward.reward_correct_guess(
+        # Calculate delta matches reward
+        reward += self.completion_reward.compute_delta_matches(
             self.current_guess,
             self.target_sequence,
+            self.previous_matches,
         )
 
-        if is_correct:
+        # Update previous_matches for next step
+        correct_positions = self.current_guess == self.target_sequence
+        current_matches = int(torch.sum(correct_positions).item())
+        self.previous_matches = current_matches
+
+        # Check for milestone bonuses (one-time rewards)
+        half_threshold = self.sequence_length // 2
+
+        # Half-correct milestone
+        if current_matches >= half_threshold and not self.half_correct_achieved:
+            reward += self.config.reward_half_correct
+            self.half_correct_achieved = True
             if self.config.verbose:
-                print("Correct sequence guessed!")
-            return reward
+                print(f"Half-correct milestone achieved! ({current_matches}/{self.sequence_length} correct)")
 
-        # Update feedback information without shaping additional rewards
+        # Fully-correct milestone
+        is_correct = torch.equal(self.current_guess, self.target_sequence)
+        if is_correct and not self.fully_correct_achieved:
+            reward += self.config.reward_fully_correct
+            self.fully_correct_achieved = True
+            if self.config.verbose:
+                print("Fully correct! Sequence guessed!")
+
+        # Update feedback information
         if self.config.provide_feedback:
-            correct_positions = self.current_guess == self.target_sequence
             self.last_feedback = correct_positions.to(dtype=torch.int64)
-
-        if not self.config.allow_repeated_guesses and torch.all(self.current_guess > 0):
-            self.guess_history.append(self.current_guess.clone())
 
         return reward
 
-    def _is_episode_done(self) -> bool:
+    def _is_episode_done(self, *, is_repeat_guess: bool = False) -> bool:
         """Check if the episode should terminate"""
         if self.target_sequence is None:
             return False
@@ -268,10 +304,8 @@ class SequenceGuessingEnv:
             return True
 
         # Episode ends if repeated guess made (when not allowed)
-        if not self.config.allow_repeated_guesses and torch.all(self.current_guess > 0):
-            for prev_guess in self.guess_history:
-                if torch.equal(self.current_guess, prev_guess):
-                    return True
+        if is_repeat_guess:
+            return True
 
         return False
 
@@ -281,18 +315,16 @@ class SequenceGuessingEnv:
 
         State includes:
         - Current guess (sequence_length)
-        - Last feedback (sequence_length) - which positions were correct
         - Metadata: step_count, episode_done, last_reward (3)
         """
         current_guess = self.current_guess.to(dtype=torch.float32)
-        last_feedback = self.last_feedback.to(dtype=torch.float32)
         metadata = torch.tensor([
             self.step_count / self.max_episode_steps,
             float(self.episode_done),
             self.last_reward
         ], dtype=torch.float32)
 
-        state = torch.cat([current_guess, last_feedback, metadata])
+        state = torch.cat([current_guess, metadata])
         return state
 
     def get_state_with_target(self) -> torch.Tensor:
@@ -302,14 +334,13 @@ class SequenceGuessingEnv:
 
         current_guess = self.current_guess.to(dtype=torch.float32)
         target_sequence = self.target_sequence.to(dtype=torch.float32)
-        last_feedback = self.last_feedback.to(dtype=torch.float32)
         metadata = torch.tensor([
             self.step_count / self.max_episode_steps,
             float(self.episode_done),
             self.last_reward
         ], dtype=torch.float32)
 
-        return torch.cat([current_guess, target_sequence, last_feedback, metadata])
+        return torch.cat([current_guess, target_sequence, metadata])
 
     def action_to_position_value(self, action: int) -> Tuple[int, int]:
         """Convert action to position and value"""
@@ -317,17 +348,17 @@ class SequenceGuessingEnv:
             raise ValueError(f"Action {action} is not valid")
 
         position = action // self.num_values
-        value = (action % self.num_values) + 1
+        value = action % self.num_values
         return position, value
 
     def position_value_to_action(self, position: int, value: int) -> int:
         """Convert position and value to action"""
         if not (0 <= position < self.sequence_length):
             raise ValueError(f"Position {position} is not valid")
-        if not (1 <= value <= self.num_values):
+        if not (0 <= value < self.num_values):
             raise ValueError(f"Value {value} is not valid")
 
-        return position * self.num_values + (value - 1)
+        return position * self.num_values + value
 
     def get_info(self) -> Dict[str, Any]:
         """Get current environment information"""
@@ -346,6 +377,55 @@ class SequenceGuessingEnv:
             "use_utility_reward": self.utility_reward is not None,
             "utility_reward_name": self.utility_reward_name,
         }
+
+    def get_action_validity_mask(self) -> torch.Tensor:
+        """
+        Get a boolean mask indicating which actions are valid in the current state.
+
+        An action is invalid if:
+        1. It doesn't change the state (same digit at same position)
+        2. (If lock_correct_positions=True) It edits an already-correct position
+
+        Returns:
+            Boolean tensor of shape (action_space_size,) where True = valid, False = invalid
+        """
+        if self.target_sequence is None:
+            raise RuntimeError("Target sequence not initialized. Call reset() first.")
+
+        return self.compute_validity_mask_from_state(
+            self.current_guess, self.target_sequence
+        )
+
+    def compute_validity_mask_from_state(
+        self, current_guess: torch.Tensor, target_sequence: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute validity mask for a given state.
+
+        Args:
+            current_guess: Current guess tensor of shape (sequence_length,)
+            target_sequence: Target sequence tensor of shape (sequence_length,)
+
+        Returns:
+            Boolean tensor of shape (action_space_size,) where True = valid, False = invalid
+        """
+        # Initialize all actions as valid
+        validity_mask = torch.ones(self.action_space_size, dtype=torch.bool, device=current_guess.device)
+
+        for action in range(self.action_space_size):
+            position, value = self.action_to_position_value(action)
+
+            # Invalid if action doesn't change the state
+            if current_guess[position] == value:
+                validity_mask[action] = False
+                continue
+
+            # Invalid if position is already correct and we're locking correct positions
+            if self.config.lock_correct_positions:
+                if current_guess[position] == target_sequence[position]:
+                    validity_mask[action] = False
+
+        return validity_mask
 
 
 def create_env_from_config(config_dict: Dict[str, Any]) -> SequenceGuessingEnv:

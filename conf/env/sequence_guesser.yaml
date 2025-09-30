@@ -3,18 +3,19 @@
 
 # Game parameters
 sequence_length: 10  # Length of the hidden sequence to guess
-max_episode_steps: 100  # Maximum steps before episode termination
-num_values: 4  # Possible values at each position (0-3)
+max_episode_steps: ${agent.max_steps_per_episode}  # Synced with agent config
+num_values: 10  # Possible values at each position (0-9)
 
 # Reward structure
-reward_correct_guess: 100.0  # Reward for correctly guessing the entire sequence
-reward_wrong_guess: -1.0     # Penalty for incorrect guess
-reward_step: -0.1            # Small penalty for each step to encourage efficiency
-reward_partial_correct: 10.0  # Reward for getting part of the sequence correct
+reward_step: -0.1 # Small penalty for each step to encourage efficiency
+reward_half_correct: 50.0  # Bonus when half the sequence is correct
+reward_fully_correct: 100.0  # Bonus when the full sequence is correct
 
 # Environment behavior settings
 provide_feedback: true  # Whether to provide feedback on partial correctness
 allow_repeated_guesses: true  # Whether the same guess can be made multiple times
+use_utility_reward: false  # Whether to apply utility rewards (e.g., step penalties)
+lock_correct_positions: true  # Whether to prevent edits to already-correct positions
 
 # State space configuration
 # State includes: current_guess + feedback + metadata

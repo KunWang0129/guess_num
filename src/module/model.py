@@ -3,6 +3,11 @@ Neural Network Models for the Sequence Guessing RL Agent
 
 This module defines neural network architectures for the Q-learning agent,
 including support for hybrid action spaces (primitive actions + options).
+
+State Representation:
+    States are one-hot encoded per position: each position in the sequence
+    is represented as a one-hot vector of size num_values, followed by
+    metadata features (step_count, episode_done, last_reward).
 """
 
 import torch
@@ -20,9 +25,10 @@ class ModelConfig:
     use_batch_norm: bool = False
 
     # Input/output dimensions
-    state_size: int = 15  # Will be set based on environment
+    state_size: int = 15  # Will be set based on environment (one-hot encoded: seq_len * num_values + 3)
+    num_values: int = 10  # Number of possible values per position (e.g., 10 for digits 0-9)
     num_primitive_actions: int = 100  # sequence_length * num_values (10 * 10)
-    num_options: int = 4  # Number of available options
+    num_options: int = 0  # Number of available options - should be set based on enabled options
 
     def __post_init__(self):
         if self.hidden_sizes is None:
@@ -35,6 +41,9 @@ class SimpleMLP(nn.Module):
 
     This is a basic neural network that maps states to Q-values for all actions
     (both primitive actions and options).
+
+    Expected input: One-hot encoded state representation where each position
+    in the sequence is encoded as a one-hot vector, plus metadata features.
     """
 
     def __init__(self, config: ModelConfig):
@@ -83,6 +92,7 @@ class SimpleMLP(nn.Module):
 
         Args:
             state: Tensor of shape (batch_size, state_size)
+                   One-hot encoded: [seq_pos_0_onehot, ..., seq_pos_n_onehot, metadata]
 
         Returns:
             Q-values tensor of shape (batch_size, total_actions)
@@ -117,21 +127,25 @@ def create_model(model_type: str, config: ModelConfig) -> nn.Module:
     return SimpleMLP(config)
 
 
-def calculate_state_size(sequence_length: int) -> int:
+def calculate_state_size(sequence_length: int, num_values: int) -> int:
     """
     Calculate the state size based on environment configuration
 
+    State uses one-hot encoding per position:
+    - Each position in the sequence is encoded as a one-hot vector of size num_values
+    - Plus metadata: step_count, episode_done, last_reward (3 values)
+
     Args:
         sequence_length: Length of the sequence to guess
+        num_values: Number of possible values per position (e.g., 10 for digits 0-9)
 
     Returns:
-        Size of the state vector
+        Size of the state vector (sequence_length * num_values + 3)
     """
     # State includes:
-    # - current_guess (sequence_length)
-    # - last_feedback (sequence_length)
+    # - current_guess: one-hot encoded (sequence_length * num_values)
     # - metadata: step_count, episode_done, last_reward (3)
-    return sequence_length * 2 + 3
+    return sequence_length * num_values + 3
 
 
 def calculate_action_space_size(sequence_length: int, num_values: int, num_options: int) -> int:
@@ -140,7 +154,7 @@ def calculate_action_space_size(sequence_length: int, num_values: int, num_optio
 
     Args:
         sequence_length: Length of the sequence to guess
-        num_values: Number of possible values (1-9)
+        num_values: Number of possible digit values (e.g., 10 for digits 0-9)
         num_options: Number of available options
 
     Returns:

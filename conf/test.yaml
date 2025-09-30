@@ -1,4 +1,4 @@
-# Inference configuration for Sequence Guessing RL Agent
+# Test configuration for Sequence Guessing RL Agent
 # Mirrors training defaults for agent, environment, and data loading
 
 defaults:
@@ -21,7 +21,7 @@ checkpoint:
 # Dataset-backed sequence provider shared with training config structure
 data_loader:
   enabled: true
-  path: "./data/sequence_bank/sequence_bank_complement_pairs_test.jsonl"
+  path: "./data/sequence_bank/sequence_bank_mixed_test.jsonl"
   families: []
   limit: null
   shuffle: false
@@ -32,16 +32,16 @@ data_loader:
 evaluation:
   num_episodes: null  # Defaults to dataset size when null
   seed: ${seed}
-  deterministic: true
+  deterministic: false
 
 env_overrides:
-  enabled: false
+  enabled: true
   verbose: null
-  max_episode_steps: null
+  max_episode_steps: 1000
   provide_feedback: null
 
 output:
-  dir: "./inference_results"
+  dir: "./test_results"
   save_detailed_logs: true
   save_summary: true
   save_csv: true
@@ -62,6 +62,7 @@ logging:
   log_file: null
   console_output: true
   progress_bar: true
+  wandb: false
 
 analysis:
   baseline_comparison: false
@@ -78,6 +79,6 @@ experimental:
 
 hydra:
   run:
-    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}/inference
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}/test
   job:
-    name: inference_${project.name}
+    name: test_${project.name}

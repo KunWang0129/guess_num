@@ -6,15 +6,26 @@ defaults:
 seed: 456
 digit_min: 0
 digit_max: 9
-target_sum: 9
 test: true
 
 sequence_length: 10
-count: 300
+count: 100
 
 family:
-  name: complement_pairs
-  params: {}
+  name: mixed
+  families:
+    - name: uniform
+    - name: palindrome
+    - name: same_number_block
+    - name: gaussian_sequence
+    - name: monotonic_sequence
+    - name: sum_targeter
+      params:
+        target_sum: 60
+    - name: high_low_alternator
+    - name: repetitive_pattern
+    - name: digits_of_pi
+    - name: difference_maintaining
 
 output:
   dir: ./data/sequence_bank

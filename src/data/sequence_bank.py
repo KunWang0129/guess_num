@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from collections import Counter
 from dataclasses import dataclass
@@ -74,69 +75,231 @@ def generate_uniform(
     rng: random.Random,
     _: np.random.Generator,
 ) -> Tuple[List[int], Dict[str, Any]]:
-    sequence = [rng.randint(cfg["digit_min"], cfg["digit_max"]) for _ in range(length)]
-    return sequence, {}
+    del params  # uniform sequences ignore per-family parameters for now
+
+    max_attempts = max(50, length * 20)
+    for _ in range(max_attempts):
+        sequence = [rng.randint(cfg["digit_min"], cfg["digit_max"]) for _ in range(length)]
+        if not _matches_special_anchor(sequence, cfg):
+            metadata = {
+                "distribution": "uniform",
+                "base_uniform": sequence.copy(),
+            }
+            return sequence, metadata
+
+    raise RuntimeError(
+        "Unable to sample a uniform sequence that avoids special-family anchors"
+    )
 
 
-@register_family("complement_pairs")
-def generate_complement_pairs(
+def _generate_uniform_base(
+    length: int, cfg: Dict[str, Any], rng: random.Random
+) -> List[int]:
+    return [rng.randint(cfg["digit_min"], cfg["digit_max"]) for _ in range(length)]
+
+
+def _matches_special_anchor(sequence: List[int], cfg: Dict[str, Any]) -> bool:
+    if not sequence:
+        return False
+
+    digit_min = int(cfg["digit_min"])
+    digit_max = int(cfg["digit_max"])
+
+    def within(value: int) -> bool:
+        return digit_min <= value <= digit_max
+
+    first = sequence[0]
+    last = sequence[-1]
+    length = len(sequence)
+
+    if length > 1 and sequence == sequence[::-1]:
+        return True
+    if within(0) and first == 0 and last == 0:
+        return True
+    if within(0) and within(9) and first == 0 and last == 9:
+        return True
+    if within(1) and length >= 2 and sequence[0] == sequence[1] == 1:
+        return True
+    if within(5) and first == last == 5:
+        return True
+    if within(6) and first == last == 6:
+        return True
+    if within(1) and within(8) and first == 1 and last == 8:
+        return True
+    if within(8) and within(4) and first == 8 and last == 4:
+        return True
+    if within(3) and length >= 2 and sequence[0:2] == [3, 1]:
+        return True
+    if last - first == 4:
+        return True
+
+    return False
+
+
+PI_DIGITS = (
+    "3141592653589793238462643383279502884197169399375105820974944592"
+    "3078164062862089986280348253421170679"
+)
+
+
+def _ensure_digit_range(value: int, cfg: Dict[str, Any]) -> int:
+    return max(cfg["digit_min"], min(cfg["digit_max"], value))
+
+
+@register_family("palindrome")
+def generate_palindrome(
     length: int,
     params: Dict[str, Any],
     cfg: Dict[str, Any],
     rng: random.Random,
     _: np.random.Generator,
 ) -> Tuple[List[int], Dict[str, Any]]:
-    target_sum = int(params.get("target_sum", cfg.get("target_sum", 10)))
-    low = int(cfg["digit_min"])
-    high = int(cfg["digit_max"])
-    lower_bound = max(low, target_sum - high)
-    upper_bound = min(high, target_sum - low)
-    if lower_bound > upper_bound:
-        raise ValueError(
-            "Complement pair generation impossible with current digit range and target"
-        )
+    if length <= 0:
+        raise ValueError("Sequence length must be positive")
 
-    sequence = [0] * length
+    if not (cfg["digit_min"] <= 0 <= cfg["digit_max"]):
+        raise ValueError("Digit range must include 0 for palindrome starting condition")
+
+    base_uniform = _generate_uniform_base(length, cfg, rng)
+    sequence = base_uniform.copy()
+
+    first_digit = _ensure_digit_range(params.get("first_digit", 0), cfg)
+    requested_last = params.get("last_digit")
+    if requested_last is None:
+        last_digit = first_digit
+    else:
+        last_digit = _ensure_digit_range(requested_last, cfg)
+
+    if first_digit != last_digit:
+        raise ValueError("First and last digits must match for a palindrome sequence")
+
+    digit_choices = params.get("digit_choices")
+    if digit_choices is not None:
+        normalized_choices = []
+        for value in digit_choices:
+            try:
+                digit = int(value)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"Invalid digit choice '{value}'") from exc
+            if cfg["digit_min"] <= digit <= cfg["digit_max"]:
+                normalized_choices.append(_ensure_digit_range(digit, cfg))
+        allowed_digits = sorted(set(normalized_choices))
+        if not allowed_digits:
+            raise ValueError("No valid digit choices available within digit range")
+    else:
+        allowed_digits = list(range(cfg["digit_min"], cfg["digit_max"] + 1))
+
+    if first_digit not in allowed_digits:
+        allowed_digits = sorted(allowed_digits + [first_digit])
+
+    if length >= 1:
+        sequence[0] = first_digit
+    if length >= 2:
+        sequence[-1] = first_digit
+
     for idx in range(length // 2):
-        left = rng.randint(lower_bound, upper_bound)
-        right = target_sum - left
-        sequence[idx] = left
-        sequence[length - idx - 1] = right
+        if idx == 0:
+            value = first_digit
+        else:
+            value = rng.choice(allowed_digits)
+        sequence[idx] = value
+        sequence[length - idx - 1] = value
 
     if length % 2 == 1:
-        sequence[length // 2] = rng.randint(low, high)
+        mid = length // 2
+        middle_digit = params.get("middle_digit")
+        if middle_digit is not None:
+            value = _ensure_digit_range(int(middle_digit), cfg)
+        else:
+            value = first_digit if length == 1 else rng.choice(allowed_digits)
+        sequence[mid] = value
 
-    return sequence, {"target_sum": target_sum}
+    metadata = {
+        "transformation": "palindrome_symmetric",
+        "starting_condition": {"first_digit": first_digit, "last_digit": last_digit},
+        "digit_choices": allowed_digits,
+        "base_uniform": base_uniform,
+    }
+    return sequence, metadata
 
 
-@register_family("parity_lock")
-def generate_parity_lock(
+@register_family("same_number_block")
+def generate_same_number_block(
     length: int,
     params: Dict[str, Any],
     cfg: Dict[str, Any],
     rng: random.Random,
     _: np.random.Generator,
 ) -> Tuple[List[int], Dict[str, Any]]:
-    parity = params.get("parity", "odd")
-    parity = parity.lower()
-    if parity not in {"odd", "even"}:
-        raise ValueError("parity must be 'odd' or 'even'")
+    if length <= 0:
+        raise ValueError("Sequence length must be positive")
 
-    remainder = 1 if parity == "odd" else 0
-    allowed = [
-        value
-        for value in range(cfg["digit_min"], cfg["digit_max"] + 1)
-        if value % 2 == remainder
-    ]
-    if not allowed:
-        raise ValueError("No digits available for selected parity and digit range")
+    if not (cfg["digit_min"] <= 1 <= cfg["digit_max"]):
+        raise ValueError(
+            "Digit range must include 1 for same number block starting condition"
+        )
 
-    sequence = [rng.choice(allowed) for _ in range(length)]
-    return sequence, {"parity": parity, "allowed_digits": allowed}
+    base_uniform = _generate_uniform_base(length, cfg, rng)
+    max_block = int(params.get("max_block_size", max(2, min(4, length))))
+    max_block = max(2, min(max_block, length))
+
+    sequence: List[int] = []
+    block_lengths: List[int] = []
+
+    first_block_len = min(length, max(2, rng.randint(2, max_block)))
+    sequence.extend([1] * first_block_len)
+    block_lengths.append(first_block_len)
+
+    previous_digit = 1
+    idx = first_block_len
+    while idx < length:
+        digit = rng.randint(cfg["digit_min"], cfg["digit_max"])
+        if digit == previous_digit:
+            digit = (digit + 1 - cfg["digit_min"]) % (cfg["digit_max"] - cfg["digit_min"] + 1)
+            digit += cfg["digit_min"]
+
+        remaining = length - idx
+        block_len = rng.randint(1, min(remaining, max_block))
+        sequence.extend([digit] * block_len)
+        block_lengths.append(block_len)
+        previous_digit = digit
+        idx += block_len
+
+    sequence = sequence[:length]
+    if length >= 1:
+        sequence[0] = 1
+    if length >= 2:
+        sequence[1] = 1
+
+    total_blocks = sum(block_lengths)
+    if total_blocks > length:
+        overflow = total_blocks - length
+        block_lengths[-1] = max(1, block_lengths[-1] - overflow)
+
+    final_blocks: List[int] = []
+    if sequence:
+        current_digit = sequence[0]
+        run_length = 1
+        for value in sequence[1:]:
+            if value == current_digit:
+                run_length += 1
+            else:
+                final_blocks.append(run_length)
+                current_digit = value
+                run_length = 1
+        final_blocks.append(run_length)
+
+    metadata = {
+        "transformation": "same_number_block",
+        "starting_condition": {"first_digit": 1, "second_digit": 1},
+        "block_lengths": final_blocks,
+        "base_uniform": base_uniform,
+    }
+    return sequence, metadata
 
 
-@register_family("gaussian_centered")
-def generate_gaussian_centered(
+@register_family("gaussian_sequence")
+def generate_gaussian_sequence(
     length: int,
     params: Dict[str, Any],
     cfg: Dict[str, Any],
@@ -144,56 +307,272 @@ def generate_gaussian_centered(
     np_rng: np.random.Generator,
 ) -> Tuple[List[int], Dict[str, Any]]:
     mean = float(params.get("mean", 5.0))
-    std = float(params.get("std", 1.5))
-    digits = np_rng.normal(loc=mean, scale=std, size=length)
-    rounded = np.rint(digits).astype(int)
-    clipped = np.clip(rounded, cfg["digit_min"], cfg["digit_max"]).tolist()
-    return clipped, {"mean": mean, "std": std}
+    variance = float(params.get("variance", 2.0))
+    std = math.sqrt(max(variance, 0.0))
+
+    anchor_value = int(params.get("anchor_value", 5))
+    if not (cfg["digit_min"] <= anchor_value <= cfg["digit_max"]):
+        raise ValueError("Digit range must include anchor value for gaussian sequence")
+
+    base_uniform = _generate_uniform_base(length, cfg, rng)
+    samples = np_rng.normal(loc=mean, scale=std if std > 0 else 1.0, size=length)
+    digits = np.rint(samples).astype(int)
+    clipped = np.clip(digits, cfg["digit_min"], cfg["digit_max"]).tolist()
+
+    if length >= 1:
+        clipped[0] = _ensure_digit_range(anchor_value, cfg)
+    if length >= 2:
+        clipped[-1] = _ensure_digit_range(anchor_value, cfg)
+
+    metadata = {
+        "transformation": "gaussian_sequence",
+        "mean": mean,
+        "variance": variance,
+        "anchor_value": anchor_value,
+        "starting_condition": {"first_digit": anchor_value, "last_digit": anchor_value},
+        "base_uniform": base_uniform,
+    }
+    return clipped, metadata
 
 
-@register_family("progression")
-def generate_progression(
+@register_family("monotonic_sequence")
+def generate_monotonic_sequence(
     length: int,
     params: Dict[str, Any],
     cfg: Dict[str, Any],
     rng: random.Random,
     _: np.random.Generator,
 ) -> Tuple[List[int], Dict[str, Any]]:
-    start_range = params.get("start_range", [cfg["digit_min"], cfg["digit_max"]])
-    if len(start_range) != 2:
-        raise ValueError("start_range must contain [min, max]")
-    start_low = int(start_range[0])
-    start_high = int(start_range[1])
-    if start_low > start_high:
-        start_low, start_high = start_high, start_low
+    if length <= 0:
+        raise ValueError("Sequence length must be positive")
 
-    step_options = params.get("step_options", [-2, -1, 1, 2])
-    if not step_options:
-        raise ValueError("step_options must provide at least one step value")
+    if not (cfg["digit_min"] <= 6 <= cfg["digit_max"]):
+        raise ValueError("Digit range must include 6 for sum targeter starting condition")
 
-    noise_prob = float(params.get("noise_prob", 0.0))
-    noise_magnitude = int(params.get("noise_magnitude", 1))
+    base_uniform = _generate_uniform_base(length, cfg, rng)
+    sequence = [0] * length
+    start_digit = _ensure_digit_range(params.get("start_digit", 0), cfg)
+    end_digit = _ensure_digit_range(params.get("end_digit", 9), cfg)
+    if start_digit > end_digit:
+        start_digit, end_digit = end_digit, start_digit
 
-    start = rng.randint(start_low, start_high)
-    step = rng.choice(step_options)
+    if length >= 1:
+        sequence[0] = start_digit
 
-    sequence: List[int] = []
-    noisy_indices: List[int] = []
-    for idx in range(length):
-        value = start + idx * step
-        if noise_prob > 0 and rng.random() < noise_prob:
-            jitter = rng.randint(-noise_magnitude, noise_magnitude)
-            value += jitter
-            noisy_indices.append(idx)
-        value = max(cfg["digit_min"], min(cfg["digit_max"], value))
-        sequence.append(value)
+    current = start_digit if length >= 1 else 0
+    for idx in range(1, length - 1):
+        positions_left = length - idx - 1
+        min_val = current
+        max_val = end_digit - positions_left
+        max_val = max(min_val, min(max_val, cfg["digit_max"]))
+        next_value = rng.randint(min_val, max_val)
+        sequence[idx] = next_value
+        current = next_value
+
+    if length >= 2:
+        sequence[-1] = end_digit
+        if sequence[-2] > sequence[-1]:
+            sequence[-2] = sequence[-1]
 
     metadata = {
-        "start": start,
-        "step": step,
-        "noise_prob": noise_prob,
-        "noise_magnitude": noise_magnitude,
-        "noisy_indices": noisy_indices,
+        "transformation": "monotonic_increasing",
+        "starting_condition": {
+            "first_digit": start_digit,
+            "last_digit": end_digit,
+        },
+        "base_uniform": base_uniform,
+    }
+    return sequence, metadata
+
+
+@register_family("sum_targeter")
+def generate_sum_targeter(
+    length: int,
+    params: Dict[str, Any],
+    cfg: Dict[str, Any],
+    rng: random.Random,
+    _: np.random.Generator,
+) -> Tuple[List[int], Dict[str, Any]]:
+    if length <= 0:
+        raise ValueError("Sequence length must be positive")
+
+    base_uniform = _generate_uniform_base(length, cfg, rng)
+    target = int(params.get("target_sum", 60))
+    min_sum = cfg["digit_min"] * length
+    max_sum = cfg["digit_max"] * length
+    target = max(min_sum, min(max_sum, target))
+
+    sequence = [cfg["digit_min"]] * length
+    if length >= 1:
+        sequence[0] = _ensure_digit_range(6, cfg)
+    if length >= 2:
+        sequence[-1] = _ensure_digit_range(6, cfg)
+
+    indices = list(range(1, length - 1))
+    if not indices and target != sum(sequence):
+        raise ValueError("Target sum incompatible with sequence length for Sum Targeter")
+
+    current_sum = sum(sequence)
+    difference = target - current_sum
+
+    attempts = 0
+    limit = length * cfg.get("digit_max", 9) * 10
+    while difference != 0 and attempts < limit:
+        attempts += 1
+        if not indices:
+            break
+        idx = rng.choice(indices)
+        if difference > 0:
+            if sequence[idx] >= cfg["digit_max"]:
+                continue
+            sequence[idx] += 1
+            difference -= 1
+        else:
+            if sequence[idx] <= cfg["digit_min"]:
+                continue
+            sequence[idx] -= 1
+            difference += 1
+
+    if difference != 0:
+        raise ValueError("Unable to satisfy target sum within constraints")
+
+    metadata = {
+        "transformation": "sum_targeter",
+        "target_sum": target,
+        "starting_condition": {"first_digit": 6, "last_digit": 6},
+        "base_uniform": base_uniform,
+    }
+    return sequence, metadata
+
+
+@register_family("high_low_alternator")
+def generate_high_low_alternator(
+    length: int,
+    params: Dict[str, Any],
+    cfg: Dict[str, Any],
+    rng: random.Random,
+    _: np.random.Generator,
+) -> Tuple[List[int], Dict[str, Any]]:
+    low_digits = params.get("low_digits", [0, 1, 2])
+    high_digits = params.get("high_digits", [7, 8, 9])
+
+    low_choices = [d for d in low_digits if cfg["digit_min"] <= d <= cfg["digit_max"]]
+    high_choices = [d for d in high_digits if cfg["digit_min"] <= d <= cfg["digit_max"]]
+    if not low_choices or not high_choices:
+        raise ValueError("Digit range incompatible with high/low alternator choices")
+    if 1 not in low_choices:
+        raise ValueError("Low digit options must include 1 for starting condition")
+    if 8 not in high_choices:
+        raise ValueError("High digit options must include 8 for starting condition")
+
+    base_uniform = _generate_uniform_base(length, cfg, rng)
+    sequence = []
+    for idx in range(length):
+        candidates = low_choices if idx % 2 == 0 else high_choices
+        value = rng.choice(candidates)
+        sequence.append(value)
+
+    if length >= 1:
+        sequence[0] = 1
+    if length >= 2:
+        sequence[-1] = 8
+
+    metadata = {
+        "transformation": "high_low_alternator",
+        "starting_condition": {"first_digit": 1, "last_digit": 8},
+        "base_uniform": base_uniform,
+    }
+    return sequence, metadata
+
+
+@register_family("repetitive_pattern")
+def generate_repetitive_pattern(
+    length: int,
+    params: Dict[str, Any],
+    cfg: Dict[str, Any],
+    rng: random.Random,
+    __: np.random.Generator,
+) -> Tuple[List[int], Dict[str, Any]]:
+    pattern = params.get("pattern", [8, 4])
+    if not pattern:
+        raise ValueError("Pattern must contain at least one digit")
+    for value in pattern:
+        if not (cfg["digit_min"] <= int(value) <= cfg["digit_max"]):
+            raise ValueError("Pattern digits must fall within configured digit range")
+
+    base_uniform = _generate_uniform_base(length, cfg, rng)
+    sequence = [pattern[idx % len(pattern)] for idx in range(length)]
+    if length >= 1:
+        sequence[0] = pattern[0]
+    if length >= 2:
+        sequence[-1] = pattern[1 % len(pattern)]
+
+    metadata = {
+        "transformation": "repetitive_pattern",
+        "pattern": pattern,
+        "starting_condition": {"first_digit": 8, "last_digit": 4},
+        "base_uniform": base_uniform,
+    }
+    return sequence, metadata
+
+
+@register_family("digits_of_pi")
+def generate_digits_of_pi(
+    length: int,
+    params: Dict[str, Any],
+    cfg: Dict[str, Any],
+    rng: random.Random,
+    _: np.random.Generator,
+) -> Tuple[List[int], Dict[str, Any]]:
+    if length > len(PI_DIGITS):
+        raise ValueError("Requested length exceeds available precomputed pi digits")
+
+    base_uniform = _generate_uniform_base(length, cfg, rng)
+    digits = [int(char) for char in PI_DIGITS[:length]]
+
+    metadata = {
+        "transformation": "digits_of_pi",
+        "starting_condition": {"prefix": [3, 1]},
+        "base_uniform": base_uniform,
+    }
+    return digits, metadata
+
+
+@register_family("difference_maintaining")
+def generate_difference_maintaining(
+    length: int,
+    params: Dict[str, Any],
+    cfg: Dict[str, Any],
+    rng: random.Random,
+    _: np.random.Generator,
+) -> Tuple[List[int], Dict[str, Any]]:
+    if length < 2:
+        raise ValueError("Sequence length must be at least 2 for difference maintaining")
+
+    base_uniform = _generate_uniform_base(length, cfg, rng)
+    range_width = int(params.get("range_width", 4))
+    if range_width <= 0:
+        raise ValueError("range_width must be positive")
+    max_start = cfg["digit_max"] - range_width
+    min_start = cfg["digit_min"]
+    if min_start > max_start:
+        raise ValueError("Digit range too small for difference maintaining sequence")
+
+    start_value = rng.randint(min_start, max_start)
+    end_value = start_value + range_width
+
+    sequence = [start_value]
+    midpoint = start_value + range_width // 2
+    for _ in range(length - 2):
+        sequence.append(midpoint)
+    if length >= 2:
+        sequence.append(end_value)
+
+    metadata = {
+        "transformation": "difference_maintaining",
+        "range_width": range_width,
+        "starting_condition": {"first_last_difference": range_width},
+        "base_uniform": base_uniform,
     }
     return sequence, metadata
 
@@ -210,6 +589,9 @@ def generate_bank(cfg: DictConfig) -> Tuple[List[Dict[str, Any]], SequenceBankSu
     rng = random.Random(resolved_cfg["seed"])
     np_rng = np.random.default_rng(resolved_cfg["seed"])
 
+    sequence_length = int(resolved_cfg.get("sequence_length", 0))
+    if sequence_length <= 0:
+        raise ValueError("sequence_length must be a positive integer")
     family_cfg = getattr(cfg, "family", None)
     if family_cfg is None:
         raise KeyError("Configuration must contain a 'family' section")
@@ -218,43 +600,79 @@ def generate_bank(cfg: DictConfig) -> Tuple[List[Dict[str, Any]], SequenceBankSu
     if not isinstance(family_container, dict):
         raise TypeError("Family config must be a mapping")
 
-    family_name = str(family_container.get("name", "")).strip()
-    if not family_name:
-        raise ValueError("family.name must be provided")
-
-    count = int(resolved_cfg.get("count", 0))
-    if count <= 0:
-        raise ValueError("count must be a positive integer")
-
-    params = family_container.get("params", {}) or {}
-
-    sequence_length = int(resolved_cfg.get("sequence_length", 0))
-    if sequence_length <= 0:
-        raise ValueError("sequence_length must be a positive integer")
-
-    generator = GENERATOR_REGISTRY.get(family_name)
-    if generator is None:
-        available = ", ".join(sorted(GENERATOR_REGISTRY))
-        raise KeyError(
-            f"Unknown family '{family_name}'. Available families: {available}"
-        )
+    default_count = int(resolved_cfg.get("count", 0))
+    families_param = family_container.get("families")
 
     records: List[Dict[str, Any]] = []
-    for sample_index in range(count):
-        sequence, metadata = generator(
-            sequence_length, params, resolved_cfg, rng, np_rng
-        )
-        validate_sequence(sequence, resolved_cfg)
-        metadata = dict(metadata or {})
-        record = {
-            "id": f"{family_name}_{sample_index}",
-            "sequence": sequence,
-            "family": family_name,
-            "sequence_length": len(sequence),
-            "metadata": metadata,
-        }
-        record["metadata"].update({"family_params": dict(params)})
-        records.append(record)
+    family_counters: Counter[str] = Counter()
+
+    def _generate_records(
+        family_name: str,
+        entry_params: Dict[str, Any],
+        family_count: int,
+    ) -> None:
+        generator = GENERATOR_REGISTRY.get(family_name)
+        if generator is None:
+            available = ", ".join(sorted(GENERATOR_REGISTRY))
+            raise KeyError(
+                f"Unknown family '{family_name}'. Available families: {available}"
+            )
+
+        for _ in range(family_count):
+            sequence, metadata = generator(
+                sequence_length, entry_params, resolved_cfg, rng, np_rng
+            )
+            validate_sequence(sequence, resolved_cfg)
+            metadata = dict(metadata or {})
+            metadata.setdefault("family_params", dict(entry_params))
+
+            sample_index = family_counters[family_name]
+            family_counters[family_name] += 1
+
+            record = {
+                "id": f"{family_name}_{sample_index}",
+                "sequence": sequence,
+                "family": family_name,
+                "sequence_length": len(sequence),
+                "metadata": metadata,
+            }
+            records.append(record)
+
+    if families_param is not None:
+        if not isinstance(families_param, list):
+            raise TypeError("family.families must be a list of family specifications")
+        if not families_param:
+            raise ValueError("family.families must contain at least one entry")
+
+        for family_entry in families_param:
+            if not isinstance(family_entry, dict):
+                raise TypeError("Each family entry must be a mapping")
+            family_name = str(family_entry.get("name", "")).strip()
+            if not family_name:
+                raise ValueError("Each family entry must include a 'name'")
+
+            entry_params = family_entry.get("params", {}) or {}
+            raw_count = family_entry.get("count")
+            if raw_count is None:
+                if default_count <= 0:
+                    raise ValueError(
+                        "Either top-level count or per-family count must be positive"
+                    )
+                family_count = default_count
+            else:
+                family_count = int(raw_count)
+            if family_count <= 0:
+                raise ValueError("family count must be positive")
+
+            _generate_records(family_name, entry_params, family_count)
+    else:
+        family_name = str(family_container.get("name", "")).strip()
+        if not family_name:
+            raise ValueError("family.name must be provided when families are not listed")
+        if default_count <= 0:
+            raise ValueError("count must be a positive integer")
+        entry_params = family_container.get("params", {}) or {}
+        _generate_records(family_name, entry_params, default_count)
 
     if not records:
         raise ValueError("No sequences generated; check family counts in configuration")

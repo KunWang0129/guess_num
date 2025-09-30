@@ -15,11 +15,14 @@ from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import glob
+from collections import Counter
+from typing import Any, Dict, Tuple
 
-from .environment import SequenceGuessingEnv, SequenceGuessingConfig
-from .agent import DQNAgent, AgentConfig
-from .model import ModelConfig
+from .module.environment import SequenceGuessingEnv, SequenceGuessingConfig
+from .module.agent import DQNAgent, AgentConfig
+from .module.model import ModelConfig
 from .data import create_sequence_loader
+from .utils.logging_utils import init_wandb_run, write_option_frequencies_csv, append_option_frequencies_timeseries
 
 # Set up logging
 log = logging.getLogger(__name__)
@@ -81,10 +84,7 @@ def create_environment(config: DictConfig) -> SequenceGuessingEnv:
         sequence_length=config.env.sequence_length,
         max_episode_steps=config.env.max_episode_steps,
         num_values=config.env.num_values,
-        reward_correct_guess=config.env.reward_correct_guess,
-        reward_wrong_guess=config.env.reward_wrong_guess,
         reward_step=config.env.reward_step,
-        reward_partial_correct=config.env.reward_partial_correct,
         provide_feedback=config.env.provide_feedback,
         allow_repeated_guesses=config.env.allow_repeated_guesses,
         verbose=config.env.verbose
@@ -105,7 +105,11 @@ def create_environment(config: DictConfig) -> SequenceGuessingEnv:
             dataset_summary.get("families"),
         )
 
-    return SequenceGuessingEnv(env_config, sequence_provider=sequence_provider)
+    return SequenceGuessingEnv(
+        env_config,
+        sequence_provider=sequence_provider,
+        use_utility_reward=config.env.get("use_utility_reward", False)
+    )
 
 
 def create_agent_config(config: DictConfig) -> AgentConfig:
@@ -207,17 +211,17 @@ def setup_logger(config: DictConfig) -> pl.loggers.Logger:
         )
     else:
         return None
-
-
-def train_agent(config: DictConfig) -> DQNAgent:
+def train_agent(config: DictConfig, wandb_run=None, timeseries_csv_path: str = None) -> Tuple[DQNAgent, Counter, Dict[str, Any]]:
     """
     Main training function
 
     Args:
         config: Hydra configuration
+        wandb_run: Optional active Weights & Biases run
+        timeseries_csv_path: Optional path to write option frequency time-series CSV
 
     Returns:
-        Trained agent
+        Tuple containing the trained agent, aggregated option counts, and final evaluation stats
     """
     # Set random seeds for reproducibility
     pl.seed_everything(config.seed)
@@ -241,10 +245,20 @@ def train_agent(config: DictConfig) -> DQNAgent:
 
     best_reward = float('-inf')
     episodes_without_improvement = 0
+    train_option_counter = Counter()
+    current_episode = -1
 
     for episode in range(config.training.max_episodes):
+        current_episode = episode
+
         # Run episode
         episode_stats = agent.run_episode()
+        episode_option_counts = episode_stats.get("option_selection_counts", {}) or {}
+
+        # Compute average loss for this episode
+        step_infos = episode_stats.get("step_infos", [])
+        losses = [step["loss"] for step in step_infos if step["loss"] is not None]
+        avg_loss = sum(losses) / len(losses) if losses else 0.0
 
         # Log episode statistics
         if episode % 10 == 0:
@@ -252,23 +266,66 @@ def train_agent(config: DictConfig) -> DQNAgent:
                 f"Episode {episode}: "
                 f"Reward={episode_stats['episode_reward']:.2f}, "
                 f"Length={episode_stats['episode_length']}, "
+                f"Loss={avg_loss:.4f}, "
                 f"Epsilon={agent.epsilon:.3f}, "
                 f"Buffer={len(agent.replay_buffer)}"
             )
 
-        # Log option usage
+        if episode_option_counts:
+            train_option_counter.update(episode_option_counts)
+
+        if wandb_run is not None:
+            wandb_metrics: Dict[str, Any] = {
+                "training/episode_reward": episode_stats["episode_reward"],
+                "training/episode_length": episode_stats["episode_length"],
+                "training/q_loss": avg_loss,
+                "training/epsilon": agent.epsilon,
+                "training/replay_buffer_size": episode_stats["replay_buffer_size"],
+                "training/steps_done": agent.steps_done,
+                "training/episode": episode,
+            }
+            if episode_option_counts:
+                total_options = sum(episode_option_counts.values())
+                wandb_metrics["options/train/total"] = total_options
+                for option_name, count in episode_option_counts.items():
+                    wandb_metrics[f"options/train/{option_name}"] = count
+            wandb_run.log(wandb_metrics, step=episode)
+
+        # Log option usage through logger on a slower cadence
         if agent.options_manager and episode % 50 == 0:
             option_stats = agent.options_manager.get_option_stats()
             log.info(f"Option usage: {option_stats}")
 
         # Evaluation
         if episode % config.evaluation.eval_every == 0 and episode > 0:
+            # Log cumulative option frequencies to time-series CSV
+            if timeseries_csv_path and train_option_counter:
+                append_option_frequencies_timeseries(
+                    timeseries_csv_path,
+                    episode,
+                    train_option_counter
+                )
+
             eval_stats = agent.evaluate(config.evaluation.eval_episodes)
             log.info(
                 f"Evaluation after episode {episode}: "
                 f"Mean reward={eval_stats['mean_reward']:.2f} ± {eval_stats['std_reward']:.2f}, "
                 f"Success rate={eval_stats['success_rate']:.2%}"
             )
+
+            if wandb_run is not None:
+                eval_metrics: Dict[str, Any] = {
+                    "evaluation/mean_reward": eval_stats["mean_reward"],
+                    "evaluation/std_reward": eval_stats["std_reward"],
+                    "evaluation/success_rate": eval_stats["success_rate"],
+                    "evaluation/best_reward": best_reward,
+                }
+                eval_option_counts = eval_stats.get("option_selection_counts", {}) or {}
+                if eval_option_counts:
+                    eval_metrics["options/eval/total"] = sum(eval_option_counts.values())
+                    for option_name, count in eval_option_counts.items():
+                        eval_metrics[f"options/eval/{option_name}"] = count
+                wandb_run.log(eval_metrics, step=episode)
 
             # Check for improvement
             current_reward = eval_stats['mean_reward']
@@ -317,8 +374,32 @@ def train_agent(config: DictConfig) -> DQNAgent:
 
     # Final evaluation
     log.info("Training completed. Running final evaluation...")
+
+    # Log final cumulative option frequencies to time-series CSV
+    if timeseries_csv_path and train_option_counter:
+        final_episode = current_episode + 1 if current_episode >= 0 else 0
+        append_option_frequencies_timeseries(
+            timeseries_csv_path,
+            final_episode,
+            train_option_counter
+        )
+
     final_stats = agent.evaluate(config.evaluation.eval_episodes * 2)
     log.info(f"Final evaluation: {final_stats}")
+
+    if wandb_run is not None:
+        final_option_counts = final_stats.get("option_selection_counts", {}) or {}
+        final_metrics: Dict[str, Any] = {
+            "test/mean_reward": final_stats["mean_reward"],
+            "test/std_reward": final_stats["std_reward"],
+            "test/success_rate": final_stats["success_rate"],
+        }
+        if final_option_counts:
+            final_metrics["options/test/total"] = sum(final_option_counts.values())
+            for option_name, count in final_option_counts.items():
+                final_metrics[f"options/test/{option_name}"] = count
+        final_step = current_episode + 1 if current_episode >= 0 else 0
+        wandb_run.log(final_metrics, step=final_step)
 
     # Save final model
     final_checkpoint_path = os.path.join(
@@ -328,7 +409,7 @@ def train_agent(config: DictConfig) -> DQNAgent:
     agent.save_checkpoint(final_checkpoint_path)
     log.info(f"Saved final model to {final_checkpoint_path}")
 
-    return agent
+    return agent, train_option_counter, final_stats
 
 
 def run_experiment(config: DictConfig) -> None:
@@ -351,9 +432,38 @@ def run_experiment(config: DictConfig) -> None:
     setup_logging(config)
     log.info("Starting experiment...")
 
+    wandb_run = init_wandb_run(config, logger=log)
+
+    # Setup time-series CSV for option frequencies
+    timeseries_csv_path = os.path.join(
+        config.logging.log_dir,
+        f"{config.experiment.name}_option_frequencies_timeseries.csv"
+    )
+
     try:
         # Train agent
-        agent = train_agent(config)
+        agent, train_option_counts, final_eval_stats = train_agent(
+            config,
+            wandb_run=wandb_run,
+            timeseries_csv_path=timeseries_csv_path
+        )
+
+        if train_option_counts:
+            train_csv_path = os.path.join(
+                config.logging.log_dir,
+                f"{config.experiment.name}_train_option_frequencies.csv"
+            )
+            write_option_frequencies_csv(train_csv_path, train_option_counts)
+            log.info("Wrote training option frequencies to %s", train_csv_path)
+
+        final_option_counts = final_eval_stats.get("option_selection_counts", {}) or {}
+        if final_option_counts:
+            eval_csv_path = os.path.join(
+                config.logging.log_dir,
+                f"{config.experiment.name}_eval_option_frequencies.csv"
+            )
+            write_option_frequencies_csv(eval_csv_path, final_option_counts)
+            log.info("Wrote evaluation option frequencies to %s", eval_csv_path)
 
         # Get final training statistics
         training_stats = agent.get_training_stats()
@@ -364,6 +474,12 @@ def run_experiment(config: DictConfig) -> None:
     except Exception as e:
         log.error(f"Experiment failed with error: {str(e)}")
         raise
+    finally:
+        if wandb_run is not None:
+            try:
+                wandb_run.finish()
+            except Exception as wandb_error:  # pragma: no cover - best-effort cleanup
+                log.warning("Failed to close W&B run cleanly: %s", wandb_error)
 
 
 @hydra.main(version_base=None, config_path="../conf", config_name="config")

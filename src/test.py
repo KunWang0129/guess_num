@@ -1,9 +1,10 @@
-"""Simplified inference entry point for the sequence guessing agent."""
+"""Simplified test entry point for the sequence guessing agent."""
 
 from __future__ import annotations
 
 import logging
 import os
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
@@ -11,9 +12,10 @@ import hydra
 import torch
 from omegaconf import DictConfig, OmegaConf
 
-from .agent import AgentConfig, DQNAgent
+from .module.agent import AgentConfig, DQNAgent
 from .data import SequenceBankDataLoader, create_sequence_loader
-from .environment import SequenceGuessingConfig, SequenceGuessingEnv
+from .module.environment import SequenceGuessingConfig, SequenceGuessingEnv
+from .utils.logging_utils import init_wandb_run, write_option_frequencies_csv
 
 
 log = logging.getLogger(__name__)
@@ -24,6 +26,7 @@ class SimpleInferenceResult:
     """Summary of the simplified inference run."""
 
     success_rate: float
+    option_selection_counts: Dict[str, int]
 
 
 def setup_device(device_spec: str) -> torch.device:
@@ -69,6 +72,10 @@ def instantiate_env_config(env_cfg: Optional[DictConfig]) -> SequenceGuessingCon
     env_dict: Dict[str, Any] = {}
     if env_cfg is not None:
         env_dict = dict(OmegaConf.to_container(env_cfg, resolve=True))
+        # Remove parameters that aren't part of SequenceGuessingConfig
+        env_dict.pop('use_utility_reward', None)
+        env_dict.pop('utility_reward_name', None)
+        env_dict.pop('sequence_provider', None)
     return SequenceGuessingConfig(**env_dict)
 
 
@@ -150,10 +157,12 @@ def run_dataset_inference(
 ) -> SimpleInferenceResult:
     """Evaluate agent success rate across a fixed number of sequences."""
     successes = 0
+    option_counter = Counter()
 
     for _ in range(num_episodes):
         with torch.no_grad():
             episode_stats = agent.run_episode(train=False)
+        option_counter.update(episode_stats.get("option_selection_counts", {}))
 
         target_tensor = getattr(env, "target_sequence", None)
         if target_tensor is None:
@@ -173,78 +182,112 @@ def run_dataset_inference(
             successes += 1
 
     success_rate = successes / num_episodes if num_episodes > 0 else 0.0
-    return SimpleInferenceResult(success_rate=success_rate)
+    return SimpleInferenceResult(
+        success_rate=success_rate,
+        option_selection_counts=dict(option_counter),
+    )
 
 
-@hydra.main(version_base=None, config_path="../conf", config_name="inference")
+@hydra.main(version_base=None, config_path="../conf", config_name="test")
 def main(cfg: DictConfig) -> None:
-    """Simplified Hydra entry point for inference."""
+    """Simplified Hydra entry point for testing."""
     log_level = getattr(logging, cfg.logging.level.upper(), logging.INFO)
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    log.info("Running simplified inference pipeline")
+    log.info("Running simplified test pipeline")
     log.debug("Configuration:\n%s", OmegaConf.to_yaml(cfg))
 
-    device = setup_device(cfg.device)
-    agent_config = load_agent_config_from_checkpoint(cfg.checkpoint.path)
+    wandb_run = init_wandb_run(cfg, logger=log)
 
-    evaluation_cfg = cfg.get("evaluation")
-    seed = cfg.get("seed", 0)
-    if evaluation_cfg is not None:
-        seed = evaluation_cfg.get("seed", seed)
-    deterministic = evaluation_cfg.get("deterministic", True) if evaluation_cfg else True
+    try:
+        device = setup_device(cfg.device)
+        agent_config = load_agent_config_from_checkpoint(cfg.checkpoint.path)
 
-    env_cfg = cfg.get("env")
-    if env_cfg is None:
-        raise ValueError("Inference configuration must include an environment profile")
+        evaluation_cfg = cfg.get("evaluation")
+        seed = cfg.get("seed", 0)
+        if evaluation_cfg is not None:
+            seed = evaluation_cfg.get("seed", seed)
+        deterministic = evaluation_cfg.get("deterministic", True) if evaluation_cfg else True
 
-    env_config = instantiate_env_config(env_cfg)
-    apply_env_overrides(env_config, cfg.get("env_overrides"))
+        env_cfg = cfg.get("env")
+        if env_cfg is None:
+            raise ValueError("Test configuration must include an environment profile")
 
-    sequence_loader = initialize_sequence_loader(
-        cfg.get("data_loader"),
-        sequence_length=env_config.sequence_length,
-        seed=seed,
-    )
+        env_config = instantiate_env_config(env_cfg)
+        apply_env_overrides(env_config, cfg.get("env_overrides"))
 
-    env = SequenceGuessingEnv(env_config, sequence_provider=sequence_loader)
+        sequence_loader = initialize_sequence_loader(
+            cfg.get("data_loader"),
+            sequence_length=env_config.sequence_length,
+            seed=seed,
+        )
 
-    agent_config.max_steps_per_episode = env.config.max_episode_steps
-    agent = create_agent(
-        cfg.checkpoint.path,
-        agent_config,
-        env,
-        device,
-        deterministic=deterministic,
-    )
+        env = SequenceGuessingEnv(env_config, sequence_provider=sequence_loader)
 
-    dataset_size = len(sequence_loader)
-    requested_raw = evaluation_cfg.get("num_episodes") if evaluation_cfg else None
-    requested_episodes = int(requested_raw) if requested_raw is not None else None
-    if requested_episodes is None or requested_episodes <= 0:
-        episodes_to_run = dataset_size
-    else:
-        episodes_to_run = min(dataset_size, requested_episodes)
-        if requested_episodes > dataset_size:
-            log.warning(
-                "Requested %d evaluation episodes but dataset only has %d; limiting to dataset size",
-                requested_episodes,
-                dataset_size,
-            )
+        agent_config.max_steps_per_episode = env.config.max_episode_steps
+        agent = create_agent(
+            cfg.checkpoint.path,
+            agent_config,
+            env,
+            device,
+            deterministic=deterministic,
+        )
 
-    result = run_dataset_inference(agent, env, episodes_to_run)
+        dataset_size = len(sequence_loader)
+        requested_raw = evaluation_cfg.get("num_episodes") if evaluation_cfg else None
+        requested_episodes = int(requested_raw) if requested_raw is not None else None
+        if requested_episodes is None or requested_episodes <= 0:
+            episodes_to_run = dataset_size
+        else:
+            episodes_to_run = min(dataset_size, requested_episodes)
+            if requested_episodes > dataset_size:
+                log.warning(
+                    "Requested %d evaluation episodes but dataset only has %d; limiting to dataset size",
+                    requested_episodes,
+                    dataset_size,
+                )
 
-    log.info(
-        "Evaluated %d sequences (dataset_size=%d, sequence_length=%d, max_episode_steps=%d)",
-        episodes_to_run,
-        dataset_size,
-        env.config.sequence_length,
-        env.config.max_episode_steps,
-    )
-    log.info("Success rate: %.2f%%", result.success_rate * 100.0)
+        result = run_dataset_inference(agent, env, episodes_to_run)
+
+        log.info(
+            "Evaluated %d sequences (dataset_size=%d, sequence_length=%d, max_episode_steps=%d)",
+            episodes_to_run,
+            dataset_size,
+            env.config.sequence_length,
+            env.config.max_episode_steps,
+        )
+        log.info("Success rate: %.2f%%", result.success_rate * 100.0)
+
+        option_counts = result.option_selection_counts
+        if option_counts:
+            log.info("Option selection counts: %s", option_counts)
+
+        if bool(cfg.output.get("save_csv", False)) and option_counts:
+            output_dir = cfg.output.dir
+            os.makedirs(output_dir, exist_ok=True)
+            csv_path = os.path.join(output_dir, "option_frequencies.csv")
+            write_option_frequencies_csv(csv_path, option_counts)
+            log.info("Saved option frequency CSV to %s", csv_path)
+
+        if wandb_run is not None:
+            wandb_metrics: Dict[str, Any] = {
+                "test/success_rate": result.success_rate,
+            }
+            if option_counts:
+                wandb_metrics["options/test/total"] = sum(option_counts.values())
+                for option_name, count in option_counts.items():
+                    wandb_metrics[f"options/test/{option_name}"] = count
+            wandb_run.log(wandb_metrics)
+
+    finally:
+        if wandb_run is not None:
+            try:
+                wandb_run.finish()
+            except Exception as wandb_error:  # pragma: no cover - best-effort cleanup
+                log.warning("Failed to close W&B run cleanly: %s", wandb_error)
 
 
 if __name__ == "__main__":

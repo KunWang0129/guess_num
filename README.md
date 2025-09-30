@@ -24,11 +24,16 @@ This project is built with PyTorch Lightning for the training structure and Hydr
 │   │   └── default.yaml           # PyTorch Lightning trainer configs
 │   └── config.yaml                # Main configuration file
 └── src/                           # Source code directory
-    ├── environment.py             # Guessing game environment
-    ├── agent.py                   # Core LightningModule RL agent
-    ├── model.py                   # Neural network architectures
-    ├── options.py                 # Options framework implementation
-    ├── replay_buffer.py           # Experience replay buffer
+    ├── data/                      # Data generation and loading
+    │   ├── sequence_bank.py       # Dataset generation utilities
+    │   └── loaders.py             # Data loading utilities
+    ├── module/                    # Core RL modules
+    │   ├── agent.py               # Core LightningModule RL agent
+    │   ├── environment.py         # Guessing game environment
+    │   ├── model.py               # Neural network architectures
+    │   ├── options.py             # Options framework implementation
+    │   └── replay_buffer.py       # Experience replay buffer
+    ├── inference.py               # Inference entry point
     └── train.py                   # Main training entry point
 ```
 

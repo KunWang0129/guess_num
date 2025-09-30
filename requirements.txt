@@ -13,6 +13,7 @@ omegaconf>=2.3.0
 
 # Logging and visualization
 tensorboard>=2.14.0
+wandb>=0.15.0
 
 # Optional: For better performance and compatibility
 tqdm>=4.64.0

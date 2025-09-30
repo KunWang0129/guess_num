@@ -2,23 +2,26 @@
 # Parameters for Deep Q-Network agent with options support
 
 # Learning parameters
-learning_rate: 1e-3
+learning_rate: 1e-4
 gamma: 0.99  # Discount factor
 batch_size: 32
 
 # Exploration parameters
 eps_start: 1.0
 eps_end: 0.05
-eps_decay: 0.995
+eps_decay: 0.99999
 
 # Target network update
-target_update_freq: 100  # Update target network every N steps
+target_update_freq: 10000  # Update target network every N steps
 soft_update_tau: 0.001  # For soft updates (if enabled)
-use_soft_updates: false
+use_soft_updates: true
 
 # Training parameters
 max_episodes: 1000
-max_steps_per_episode: 100
+max_steps_per_episode: 1000
+
+# Q-value normalization
+q_value_clip_max: 100.0  # Clip Q-values to prevent explosion
 
 # Options-specific parameters
 use_macro_options: true
@@ -27,9 +30,9 @@ option_termination_bonus: 0.0  # Bonus for successful option completion
 
 # Network architecture
 model_type: "mlp"
-hidden_sizes: [128, 128]
+hidden_sizes: [128, 256, 256, 128]
 activation: "relu"
-dropout_rate: 0.1
+dropout_rate: 0.0
 
 # Replay buffer
 buffer_size: 10000
@@ -39,9 +42,15 @@ prioritized_replay: false
 # Available options to use (can be toggled)
 options:
   guess_first_half: true
-  complementary_guess: true
-  odd_numbers_only: true
-  gaussian_guess: true
+  palindrome_complement: true
+  same_number_block: true
+  gaussian_fill: true
+  monotonic_sequence_fill: true
+  sum_targeter: true
+  high_low_alternator: true
+  pattern_84_fill: true
+  pi_digits_fill: true
+  difference_maintainer: true
 
 # Debugging and monitoring
 verbose: false
