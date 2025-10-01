@@ -1,0 +1,4 @@
+# Embedding-based Network Configuration
+
+name: "EmbeddingChars"  # Network type
+hidden_size: 256  # Size of hidden layers

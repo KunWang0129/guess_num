@@ -9,7 +9,7 @@ digit_max: 9
 test: false
 
 sequence_length: 10
-count: 1000
+count: 1000  # Number of unique sequences to generate
 
 # Available sequence families:
 # - uniform: Random sequences drawn from the configured digit range
@@ -23,34 +23,10 @@ count: 1000
 # - digits_of_pi: Prefixes of π's digit expansion
 # - difference_maintaining: Sequences constrained to a narrow value band (width 4)
 
+# Specify which family to generate
 family:
-  name: mixed
-  families:
-    - name: uniform
-    - name: palindrome
-    - name: same_number_block
-      params:
-        max_block_size: 4
-    - name: gaussian_sequence
-      params:
-        mean: 5.0
-        variance: 2.0
-        anchor_value: 5
-    - name: monotonic_sequence
-      params:
-        start_digit: 0
-        end_digit: 9
-    - name: sum_targeter
-      params:
-        target_sum: 60
-    - name: high_low_alternator
-    - name: repetitive_pattern
-      params:
-        pattern: [8, 4]
-    - name: digits_of_pi
-    - name: difference_maintaining
-      params:
-        range_width: 4
+  name: uniform  # Change this to the family you want to generate
+  params: {}     # Family-specific parameters (optional)
 
 output:
   dir: ./data/sequence_bank

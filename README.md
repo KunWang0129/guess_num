@@ -28,11 +28,18 @@ This project is built with PyTorch Lightning for the training structure and Hydr
     │   ├── sequence_bank.py       # Dataset generation utilities
     │   └── loaders.py             # Data loading utilities
     ├── module/                    # Core RL modules
-    │   ├── agent.py               # Core LightningModule RL agent
-    │   ├── environment.py         # Guessing game environment
-    │   ├── model.py               # Neural network architectures
-    │   ├── options.py             # Options framework implementation
-    │   └── replay_buffer.py       # Experience replay buffer
+    │   ├── dqn/                   # Deep Q-Network stack
+    │   │   ├── agent.py           # LightningModule agent implementation
+    │   │   ├── experience.py      # Replay buffer for DQN training
+    │   │   └── model.py           # State encoder and Q-value head
+    │   ├── num_seq/               # Number-sequence environment domain
+    │   │   ├── environment.py     # Guessing game environment
+    │   │   ├── option.py          # Macro/primitive option policies
+    │   │   └── rewards.py         # Reward helpers used by the env
+    │   ├── agent.py               # Back-compat shim for DQN agent
+    │   ├── environment.py         # Back-compat shim for the sequence env
+    │   ├── model.py               # Back-compat shim for DQN models
+    │   └── replay_buffer.py       # Back-compat shim for the replay buffer
     ├── inference.py               # Inference entry point
     └── train.py                   # Main training entry point
 ```

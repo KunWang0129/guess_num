@@ -1,104 +1,74 @@
-"""Helper functions for logging artifacts and summaries."""
-
-from __future__ import annotations
-
 import csv
-import logging
-import os
-from typing import Any, Mapping, Optional
-
-from omegaconf import DictConfig, OmegaConf
+from pathlib import Path
+from typing import Dict, Optional
 
 
-def write_option_frequencies_csv(path: str, counts: Mapping[str, int]) -> None:
-    """Persist option usage counts along with normalised frequencies."""
-    if not counts:
-        return
+class CSVLogger:
+    """CSV logger for training metrics."""
 
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    total = sum(max(int(value), 0) for value in counts.values())
+    def __init__(self, filename: str, fieldnames: list, log_dir: Optional[str] = None):
+        """Initialize CSV logger.
 
-    with open(path, "w", newline="") as handle:
-        writer = csv.writer(handle)
-        writer.writerow(["option_name", "count", "frequency"])
+        Args:
+            filename: CSV filename
+            fieldnames: List of column names
+            log_dir: Directory to save the CSV file (optional, can be set later)
+        """
+        self.filename = filename
+        self.fieldnames = fieldnames
+        self.log_dir = Path(log_dir) if log_dir else None
+        self.file = None
+        self.writer = None
 
-        if total == 0:
-            for name in sorted(counts):
-                writer.writerow([name, int(counts[name]), 0.0])
-            return
+        if self.log_dir:
+            self._initialize_file()
 
-        for name in sorted(counts):
-            count = max(int(counts[name]), 0)
-            frequency = count / total if total else 0.0
-            writer.writerow([name, count, frequency])
+    def _initialize_file(self):
+        """Initialize the CSV file."""
+        if self.file is not None:
+            return  # Already initialized
 
+        self.filepath = self.log_dir / self.filename
 
-def append_option_frequencies_timeseries(
-    path: str,
-    episode: int,
-    cumulative_counts: Mapping[str, int]
-) -> None:
-    """Append cumulative option frequencies at a given episode to a time-series CSV.
+        # Create parent directory if it doesn't exist
+        self.filepath.parent.mkdir(parents=True, exist_ok=True)
 
-    Args:
-        path: Path to the CSV file
-        episode: Current episode number
-        cumulative_counts: Cumulative option counts up to this episode
-    """
-    if not cumulative_counts:
-        return
+        # Open file and write header
+        self.file = open(self.filepath, 'w', newline='')
+        self.writer = csv.DictWriter(self.file, fieldnames=self.fieldnames)
+        self.writer.writeheader()
+        self.file.flush()
 
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    def set_log_dir(self, log_dir: str):
+        """Set the log directory and initialize the file.
 
-    # Check if file exists to determine if we need to write header
-    file_exists = os.path.isfile(path)
-    total = sum(max(int(value), 0) for value in cumulative_counts.values())
+        Args:
+            log_dir: Directory to save the CSV file
+        """
+        self.log_dir = Path(log_dir)
+        self._initialize_file()
 
-    with open(path, "a", newline="") as handle:
-        writer = csv.writer(handle)
+    def log(self, metrics: Dict):
+        """Log metrics to CSV.
 
-        # Write header if file is new
-        if not file_exists:
-            option_names = sorted(cumulative_counts.keys())
-            header = ["episode"] + [f"{name}_count" for name in option_names] + [f"{name}_freq" for name in option_names]
-            writer.writerow(header)
+        Args:
+            metrics: Dictionary of metrics to log
+        """
+        if self.writer is None:
+            raise RuntimeError("CSV logger is closed")
 
-        # Write data row
-        option_names = sorted(cumulative_counts.keys())
-        row = [episode]
+        # Only write fields that are in fieldnames
+        filtered_metrics = {k: v for k, v in metrics.items() if k in self.fieldnames}
+        self.writer.writerow(filtered_metrics)
+        self.file.flush()
 
-        # Add counts
-        for name in option_names:
-            count = max(int(cumulative_counts[name]), 0)
-            row.append(count)
+    def close(self):
+        """Close the CSV file."""
+        if self.file is not None:
+            self.file.close()
+            self.file = None
+            self.writer = None
 
-        # Add frequencies
-        for name in option_names:
-            count = max(int(cumulative_counts[name]), 0)
-            frequency = count / total if total > 0 else 0.0
-            row.append(frequency)
-
-        writer.writerow(row)
-
-
-def init_wandb_run(config: DictConfig, *, logger: Optional[logging.Logger] = None, **wandb_kwargs: Any):
-    """Initialise a Weights & Biases run when enabled in the logging configuration."""
-    use_wandb = getattr(config.logging, "wandb", False)
-    if not use_wandb:
-        return None
-
-    try:
-        import wandb
-    except ImportError:  # pragma: no cover - defensive guard when wandb missing
-        log = logger or logging.getLogger(__name__)
-        log.warning("W&B logging requested but the `wandb` package is not installed.")
-        return None
-
-    wandb_config = OmegaConf.to_container(config, resolve=True)
-    return wandb.init(
-        project=config.project.name,
-        name=config.experiment.name,
-        config=wandb_config,
-        reinit=True,
-        **wandb_kwargs,
-    )
+    def __del__(self):
+        """Cleanup on deletion."""
+        self.close()

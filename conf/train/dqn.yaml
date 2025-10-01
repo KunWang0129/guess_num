@@ -1,0 +1,36 @@
+# DQN Training Configuration
+# Parameters for training the Deep Q-Network
+
+# Replay buffer settings
+replay_size: 1000  # Total replay buffer size
+initialize_winning_replays: null  # Path to pre-saved winning replays (optional)
+
+# Training hyperparameters
+batch_size: 512
+lr: 1.0e-3  # Learning rate
+weight_decay: 1.0e-5  # L2 regularization
+gamma: 0.9  # Discount factor for future rewards
+
+# Exploration settings
+eps_start: 1.0  # Initial epsilon for epsilon-greedy
+eps_end: 0.01   # Final epsilon value
+last_frame_cutoff: 0.8  # Fraction of max_epochs at which epsilon reaches eps_end
+
+# Network synchronization
+sync_rate: 100  # Steps between target network updates
+
+# Episode settings
+episode_length: 512  # Max length of episode for sampling
+warm_start_steps: 1000  # Random steps to populate buffer initially
+
+# Training loop settings
+max_epochs: 5000
+checkpoint_every_n_epochs: 1000
+
+# Worker settings
+num_workers: 0  # Number of data loading workers (0 = main thread)
+
+# Logging settings
+logging:
+  csv_filename: "training_metrics.csv"  # CSV log filename
+  log_interval: 100  # Log metrics every N steps

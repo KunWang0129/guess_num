@@ -585,6 +585,14 @@ def _prepare_cfg(cfg: DictConfig) -> Dict[str, Any]:
 
 
 def generate_bank(cfg: DictConfig) -> Tuple[List[Dict[str, Any]], SequenceBankSummary]:
+    """Generate a bank of unique sequences for a single family type.
+
+    Args:
+        cfg: Configuration object
+
+    Returns:
+        Tuple of (records, summary)
+    """
     resolved_cfg = _prepare_cfg(cfg)
     rng = random.Random(resolved_cfg["seed"])
     np_rng = np.random.default_rng(resolved_cfg["seed"])
@@ -592,6 +600,12 @@ def generate_bank(cfg: DictConfig) -> Tuple[List[Dict[str, Any]], SequenceBankSu
     sequence_length = int(resolved_cfg.get("sequence_length", 0))
     if sequence_length <= 0:
         raise ValueError("sequence_length must be a positive integer")
+
+    count = int(resolved_cfg.get("count", 0))
+    if count <= 0:
+        raise ValueError("count must be a positive integer")
+
+    # Get family configuration
     family_cfg = getattr(cfg, "family", None)
     if family_cfg is None:
         raise KeyError("Configuration must contain a 'family' section")
@@ -600,83 +614,67 @@ def generate_bank(cfg: DictConfig) -> Tuple[List[Dict[str, Any]], SequenceBankSu
     if not isinstance(family_container, dict):
         raise TypeError("Family config must be a mapping")
 
-    default_count = int(resolved_cfg.get("count", 0))
-    families_param = family_container.get("families")
+    family_name = str(family_container.get("name", "")).strip()
+    if not family_name:
+        raise ValueError("family.name must be provided")
 
+    # Get the generator for this family
+    generator = GENERATOR_REGISTRY.get(family_name)
+    if generator is None:
+        available = ", ".join(sorted(GENERATOR_REGISTRY))
+        raise KeyError(
+            f"Unknown family '{family_name}'. Available families: {available}"
+        )
+
+    entry_params = family_container.get("params", {}) or {}
+
+    # Generate unique sequences
     records: List[Dict[str, Any]] = []
-    family_counters: Counter[str] = Counter()
+    seen_sequences: set = set()
 
-    def _generate_records(
-        family_name: str,
-        entry_params: Dict[str, Any],
-        family_count: int,
-    ) -> None:
-        generator = GENERATOR_REGISTRY.get(family_name)
-        if generator is None:
-            available = ", ".join(sorted(GENERATOR_REGISTRY))
-            raise KeyError(
-                f"Unknown family '{family_name}'. Available families: {available}"
-            )
+    idx = 0
+    attempts = 0
+    max_attempts = count * 10  # Allow more attempts to reach target
 
-        for _ in range(family_count):
+    while len(records) < count and attempts < max_attempts:
+        attempts += 1
+        try:
             sequence, metadata = generator(
                 sequence_length, entry_params, resolved_cfg, rng, np_rng
             )
             validate_sequence(sequence, resolved_cfg)
+
+            # Check for duplicates
+            sequence_tuple = tuple(sequence)
+            if sequence_tuple in seen_sequences:
+                continue
+
+            seen_sequences.add(sequence_tuple)
             metadata = dict(metadata or {})
             metadata.setdefault("family_params", dict(entry_params))
 
-            sample_index = family_counters[family_name]
-            family_counters[family_name] += 1
-
             record = {
-                "id": f"{family_name}_{sample_index}",
                 "sequence": sequence,
                 "family": family_name,
                 "sequence_length": len(sequence),
                 "metadata": metadata,
+                "index": idx,
+                "seed": resolved_cfg["seed"],
             }
             records.append(record)
-
-    if families_param is not None:
-        if not isinstance(families_param, list):
-            raise TypeError("family.families must be a list of family specifications")
-        if not families_param:
-            raise ValueError("family.families must contain at least one entry")
-
-        for family_entry in families_param:
-            if not isinstance(family_entry, dict):
-                raise TypeError("Each family entry must be a mapping")
-            family_name = str(family_entry.get("name", "")).strip()
-            if not family_name:
-                raise ValueError("Each family entry must include a 'name'")
-
-            entry_params = family_entry.get("params", {}) or {}
-            raw_count = family_entry.get("count")
-            if raw_count is None:
-                if default_count <= 0:
-                    raise ValueError(
-                        "Either top-level count or per-family count must be positive"
-                    )
-                family_count = default_count
-            else:
-                family_count = int(raw_count)
-            if family_count <= 0:
-                raise ValueError("family count must be positive")
-
-            _generate_records(family_name, entry_params, family_count)
-    else:
-        family_name = str(family_container.get("name", "")).strip()
-        if not family_name:
-            raise ValueError("family.name must be provided when families are not listed")
-        if default_count <= 0:
-            raise ValueError("count must be a positive integer")
-        entry_params = family_container.get("params", {}) or {}
-        _generate_records(family_name, entry_params, default_count)
+            idx += 1
+        except (ValueError, RuntimeError) as e:
+            if attempts % 1000 == 0:
+                print(f"Warning: Failed attempt {attempts} for {family_name}: {e}")
+            continue
 
     if not records:
-        raise ValueError("No sequences generated; check family counts in configuration")
+        raise ValueError(f"No sequences generated for family '{family_name}'")
 
+    if len(records) < count:
+        print(f"Warning: Only generated {len(records)}/{count} unique sequences for '{family_name}' after {attempts} attempts")
+
+    # Create summary
     lengths = [entry["sequence_length"] for entry in records]
     family_counts = Counter(entry["family"] for entry in records)
 
@@ -689,27 +687,23 @@ def generate_bank(cfg: DictConfig) -> Tuple[List[Dict[str, Any]], SequenceBankSu
         length_std=float(np.std(lengths)),
     )
 
-    for idx, record in enumerate(records):
-        record["index"] = idx
-        record["seed"] = resolved_cfg["seed"]
-
     return records, summary
 
 
-def _format_records(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _format_records(records: List[Dict[str, Any]], include_id: bool = True) -> List[Dict[str, Any]]:
     formatted = []
     for item in records:
-        formatted.append(
-            {
-                "id": item["id"],
-                "sequence": list(map(int, item["sequence"])),
-                "family": item["family"],
-                "sequence_length": int(item["sequence_length"]),
-                "index": int(item["index"]),
-                "seed": int(item["seed"]),
-                "metadata": item.get("metadata", {}),
-            }
-        )
+        record_dict = {
+            "sequence": list(map(int, item["sequence"])),
+            "family": item["family"],
+            "sequence_length": int(item["sequence_length"]),
+            "index": int(item["index"]),
+            "seed": int(item["seed"]),
+            "metadata": item.get("metadata", {}),
+        }
+        if include_id and "id" in item:
+            record_dict["id"] = item["id"]
+        formatted.append(record_dict)
     return formatted
 
 
@@ -744,7 +738,7 @@ def write_outputs(
         raise ValueError("Currently only 'jsonl' output format is supported")
 
     data_path = base_dir / f"{stem}.jsonl"
-    prepared = _format_records(records)
+    prepared = _format_records(records, include_id=False)
     with data_path.open("w", encoding="utf-8") as handle:
         for row in prepared:
             handle.write(json.dumps(row, ensure_ascii=False))
@@ -779,6 +773,7 @@ def main(cfg: DictConfig) -> None:
     # Extract the data config from the nested structure
     data_cfg = cfg.data if 'data' in cfg else cfg
 
+    # Generate sequences for the specified family
     records, summary = generate_bank(data_cfg)
     output_path = write_outputs(records, summary, data_cfg)
     print_summary(output_path, summary)

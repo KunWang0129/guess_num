@@ -1,0 +1,21 @@
+# Configuration for DQN Inference
+
+defaults:
+  - network: mlp
+  - env: num_env
+  - data: sequence_bank
+  - _self_
+
+# Inference settings
+infer:
+  checkpoint_path: "lightning_logs/version_0/checkpoints/epoch=4999-step=5000.ckpt"  # Path to trained model checkpoint
+  target_sequence: "0347777430"  # Target sequence to guess
+  show_steps: true  # Show step-by-step guessing process
+
+# Device configuration
+device: "auto"  # auto, cpu, cuda
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/infer/${now:%Y-%m-%d}/${now:%H-%M-%S}

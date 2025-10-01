@@ -115,3 +115,38 @@ Here are the different configurations to follow:
 **Difference Maintaining**
 - Description: A number sequence where every digit stays within a range of 2 from both the minimum and maximum values in the sequence
 - Starting condition: When first and last number's difference is exactly 4
+
+
+
+## 3. Module Restructure Plan
+
+Goal: reorganize `src/module` into focused subpackages for the Deep Q Network stack (`dqn/`) and the number-sequence environment (`num_seq/`) while keeping existing behaviour intact.
+
+### Discovery & Scoping
+- Inventory the current contents of `src/module/` to map each class or helper to either the DQN agent stack or the number-sequence environment concerns.
+- Identify shared utilities (if any) that should remain at `src/module/__init__.py` or move to a dedicated `src/module/utils.py` so neither subpackage depends on the other.
+
+### Directory Layout Changes
+- Create `src/module/dqn/` with an `__init__.py` that re-exports the public agent, model, and replay APIs for compatibility.
+- Create `src/module/num_seq/` with an `__init__.py` that exposes environment, options, and rewards constructs.
+- Migrate or recreate the following modules under the new structure:
+  - `src/module/dqn/agent.py`: wrap the existing Lightning agent logic so it receives the environment interface and Q-network, sampling options as actions.
+  - `src/module/dqn/model.py`: split into `StateEmbedding` (encodes observations) and `QValueNetwork` (3-layer MLP returning logits passed through `softmax`). Preserve weight initialisation and device management.
+  - `src/module/dqn/experience.py`: move the replay buffer implementation largely unchanged, updating imports only.
+  - `src/module/num_seq/option.py`: hold primary and macro option definitions; ensure signatures and identifiers remain stable.
+  - `src/module/num_seq/rewards.py`: define completion and utility reward helpers invoked by the environment.
+  - `src/module/num_seq/environment.py`: encapsulate the sequence guessing environment, depending on `option` and `rewards` modules instead of mixed imports.
+
+### Import & Config Updates
+- Search the repository (`rg "module." src conf`) to locate all import sites and update them to the new package paths, keeping Hydra configuration entries in sync.
+- Adjust any `__all__`, dataclass type hints, or Lightning module references that rely on old module paths to avoid circular imports.
+- Verify Hydra configs (`conf/agent`, `conf/env`) refer to the relocated classes (e.g., `module_path: module.dqn.agent.DQNAgent`).
+
+### Backwards Compatibility & Clean-up
+- Provide convenience re-exports in `src/module/__init__.py` so existing notebooks or scripts importing from `module import Agent` continue to work until consumers migrate.
+- Remove obsolete files or empty directories in `src/module/` after the split and ensure no duplicates remain.
+- Update documentation (`README.md`, `IMPLEMENTATIONS.md`) if they reference old layouts.
+
+### Validation & Follow-up
+- Run `uv run python -m src.train trainer.fast_dev_run=true` to confirm training still composes the agent, network, and environment correctly post-move.
+- Add TODOs or future work notes if further refactors (e.g., shared base classes) are identified during the migration.

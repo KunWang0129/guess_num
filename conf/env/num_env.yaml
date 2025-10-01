@@ -1,0 +1,14 @@
+# NumEnv Environment Configuration
+# Configuration for the number sequence guessing environment
+
+# Environment name/class to use
+# Options: NumEnv10, NumEnv100, NumEnv1000, NumEnvFull, NumEnvReal, etc.
+env_class: "NumEnv100"
+
+# Environment parameters
+max_turns: 100
+allowable_sequences: null  # null means use all loaded sequences
+mask_based_state_updates: false
+
+# Sequence loading parameters
+sequence_limit: 1000  # Number of sequences to load from the data file (null for all)

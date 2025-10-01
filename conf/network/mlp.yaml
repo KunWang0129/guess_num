@@ -1,0 +1,4 @@
+# MLP Network Configuration
+
+name: "MLP"  # Network type
+hidden_size: 256  # Size of hidden layers

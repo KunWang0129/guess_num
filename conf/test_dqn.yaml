@@ -1,0 +1,21 @@
+# Configuration for DQN Testing/Evaluation
+
+defaults:
+  - network: mlp
+  - env: num_env
+  - data: sequence_bank
+  - _self_
+
+# Test settings
+test:
+  checkpoint_path: "lightning_logs/version_0/checkpoints/epoch=4999-step=5000.ckpt"  # Path to trained model checkpoint
+  num_episodes: 100  # Number of episodes to evaluate
+  output_csv: "test_results.csv"  # Path to save evaluation metrics (set to null to skip saving)
+
+# Device configuration
+device: "auto"  # auto, cpu, cuda
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/test/${now:%Y-%m-%d}/${now:%H-%M-%S}

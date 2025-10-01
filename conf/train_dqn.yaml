@@ -1,0 +1,41 @@
+# Main Configuration File for DQN Training
+# This file composes the final configuration from sub-directories
+
+defaults:
+  - train: dqn
+  - network: mlp
+  - env: num_env
+  - data: sequence_bank
+  - _self_
+
+# Global project settings
+project:
+  name: "sequence_guessing_dqn"
+  version: "1.0.0"
+  description: "DQN for 10-digit Sequence Guessing"
+
+# Experiment settings
+experiment:
+  name: "dqn_baseline"
+  save_dir: "./logs"
+  checkpoint_dir: "./logs/checkpoints"
+
+# Random seed for reproducibility
+seed: 42
+
+# Logging
+logging:
+  level: "INFO"
+  log_dir: "./logs"
+  tensorboard: true
+  wandb: false
+
+# Device configuration
+device: "auto"  # auto, cpu, cuda
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  job:
+    name: ${project.name}_${experiment.name}

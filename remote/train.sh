@@ -8,7 +8,7 @@
 
 # Full training run
 echo "Running full training..."
-uv run python -m src.train
+uv run python -m src.train_dqn
 
 # Training with custom parameters example
 # uv run python -m src.train agent.learning_rate=1e-4 agent.max_episodes=2000
